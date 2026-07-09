@@ -44,6 +44,7 @@ defmodule PhoenixKitCalendar.Schemas.Event do
     field(:title, :string)
     field(:description, :string)
     field(:location, :string)
+    field(:location_uuid, UUIDv7)
     field(:all_day, :boolean, default: false)
     field(:starts_at, :utc_datetime)
     field(:ends_at, :utc_datetime)
@@ -71,6 +72,7 @@ defmodule PhoenixKitCalendar.Schemas.Event do
       :title,
       :description,
       :location,
+      :location_uuid,
       :all_day,
       :starts_at,
       :ends_at,

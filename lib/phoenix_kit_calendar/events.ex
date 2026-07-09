@@ -102,9 +102,14 @@ defmodule PhoenixKitCalendar.Events do
       from_dt = DateTime.new!(from, ~T[00:00:00], "Etc/UTC")
       until_dt = DateTime.new!(until, ~T[00:00:00], "Etc/UTC")
 
+      # a person's schedule = events they OWN plus events they PARTICIPATE
+      # in (live resolution — see participant_visible_dynamic/1)
+      visible = dynamic([e], e.owner_uuid == ^owner_uuid)
+      visible = dynamic([e], ^visible or ^participant_visible_dynamic([owner_uuid]))
+
       events =
         from(e in Event,
-          where: e.owner_uuid == ^owner_uuid,
+          where: ^visible,
           where:
             (not e.all_day and e.starts_at < ^until_dt and e.ends_at > ^from_dt) or
               (e.all_day and e.starts_on < ^until and e.ends_on > ^from),
@@ -153,7 +158,11 @@ defmodule PhoenixKitCalendar.Events do
   defp maybe_filter_owners(query, nil), do: query
 
   defp maybe_filter_owners(query, owner_uuids) when is_list(owner_uuids) do
-    from(e in query, where: e.owner_uuid in ^owner_uuids)
+    # each selected person contributes their OWNED events plus the events
+    # they currently PARTICIPATE in
+    visible = dynamic([e], e.owner_uuid in ^owner_uuids)
+    visible = dynamic([e], ^visible or ^participant_visible_dynamic(owner_uuids))
+    from(e in query, where: ^visible)
   end
 
   @doc """
@@ -162,12 +171,38 @@ defmodule PhoenixKitCalendar.Events do
   @spec get_event(Scope.t() | nil, String.t()) ::
           {:ok, Event.t()} | {:error, :not_found | :unauthorized}
   def get_event(scope, uuid) do
-    with %Event{} = event <- repo().get(Event, uuid) || {:error, :not_found},
-         :ok <- authorize(scope, event.owner_uuid, :view) do
-      {:ok, event}
-    else
-      {:error, reason} -> {:error, reason}
+    case repo().get(Event, uuid) do
+      nil ->
+        {:error, :not_found}
+
+      %Event{} = event ->
+        cond do
+          authorize(scope, event.owner_uuid, :view) == :ok -> {:ok, event}
+          # being a participant grants visibility of THIS event only —
+          # never of the rest of the owner's calendar
+          participant?(scope, event) -> {:ok, event}
+          true -> {:error, :unauthorized}
+        end
     end
+  end
+
+  @doc """
+  Whether the scope's user currently resolves as a participant of the
+  event (live — see `participant_visible_dynamic/1`).
+  """
+  @spec participant?(Scope.t() | nil, Event.t()) :: boolean()
+  def participant?(scope, %Event{} = event) do
+    case scope && Scope.user_uuid(scope) do
+      nil ->
+        false
+
+      user_uuid ->
+        from(e in Event, where: e.uuid == ^event.uuid)
+        |> where(^participant_visible_dynamic([user_uuid]))
+        |> repo().exists?()
+    end
+  rescue
+    _ -> false
   end
 
   @doc """
@@ -229,6 +264,7 @@ defmodule PhoenixKitCalendar.Events do
       %Event{}
       |> Event.changeset(attrs)
       |> Ecto.Changeset.put_change(:owner_uuid, owner_uuid)
+      |> snapshot_location()
       |> repo().insert()
       |> tap_log("calendar_event.created", scope, opts)
     end
@@ -245,6 +281,7 @@ defmodule PhoenixKitCalendar.Events do
     with :ok <- authorize(scope, event.owner_uuid, :edit) do
       event
       |> Event.changeset(attrs)
+      |> snapshot_location()
       |> repo().update()
       |> tap_log("calendar_event.updated", scope, opts)
     end
@@ -268,6 +305,76 @@ defmodule PhoenixKitCalendar.Events do
   # ===========================================================================
 
   defp repo, do: RepoHelper.repo()
+
+  # LIVE participant visibility: true when any participant row of the event
+  # resolves to one of `user_uuids` RIGHT NOW. Resolution joins the PHYSICAL
+  # staff/CRM tables (they exist in every install via core migrations, so no
+  # module code is needed; empty tables no-op). A company participant means
+  # "whoever is a member of that company at query time" — the boss's explicit
+  # choice (2026-07-09) over save-time snapshots.
+  defp participant_visible_dynamic(user_uuids) do
+    dynamic(
+      [e],
+      fragment(
+        """
+        EXISTS (
+          SELECT 1 FROM phoenix_kit_calendar_event_participants p
+          WHERE p.event_uuid = ?
+            AND (
+              (p.kind = 'user' AND p.target_uuid = ANY(?))
+              OR (p.kind = 'staff_person' AND EXISTS (
+                    SELECT 1 FROM phoenix_kit_staff_people sp
+                    WHERE sp.uuid = p.target_uuid
+                      AND sp.status <> 'trashed'
+                      AND sp.user_uuid = ANY(?)))
+              OR (p.kind = 'crm_contact' AND EXISTS (
+                    SELECT 1 FROM phoenix_kit_crm_contacts c
+                    WHERE c.uuid = p.target_uuid
+                      AND c.status <> 'trashed'
+                      AND c.user_uuid = ANY(?)))
+              OR (p.kind = 'crm_company' AND EXISTS (
+                    SELECT 1 FROM phoenix_kit_crm_company_memberships m
+                    JOIN phoenix_kit_crm_contacts c2 ON c2.uuid = m.contact_uuid
+                    WHERE m.company_uuid = p.target_uuid
+                      AND c2.status <> 'trashed'
+                      AND c2.user_uuid = ANY(?)))
+            )
+        )
+        """,
+        e.uuid,
+        type(^user_uuids, {:array, UUIDv7}),
+        type(^user_uuids, {:array, UUIDv7}),
+        type(^user_uuids, {:array, UUIDv7}),
+        type(^user_uuids, {:array, UUIDv7})
+      )
+    )
+  end
+
+  # Snapshot the picked location's name into the free-text column so
+  # rendering never needs the locations module. A cleared/absent pick keeps
+  # whatever the user typed.
+  defp snapshot_location(%Ecto.Changeset{} = changeset) do
+    case Ecto.Changeset.get_change(changeset, :location_uuid) do
+      nil ->
+        changeset
+
+      location_uuid ->
+        name =
+          from(l in "phoenix_kit_locations",
+            where: l.uuid == type(^location_uuid, UUIDv7),
+            select: l.name
+          )
+          |> repo().one()
+
+        if is_binary(name) do
+          Ecto.Changeset.put_change(changeset, :location, name)
+        else
+          Ecto.Changeset.put_change(changeset, :location_uuid, nil)
+        end
+    end
+  rescue
+    _ -> changeset
+  end
 
   # Activity logging — guarded so a logging failure (or core without the
   # Activity module) never breaks the primary operation. Metadata carries the

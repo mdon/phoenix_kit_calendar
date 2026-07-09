@@ -50,8 +50,10 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   alias PhoenixKit.Users.Permissions
   alias PhoenixKit.Users.Roles
   alias PhoenixKitCalendar.Events
+  alias PhoenixKitCalendar.Participants
   alias PhoenixKitCalendar.Paths
   alias PhoenixKitCalendar.Schemas.Event
+  alias PhoenixKitCalendar.Sources
   alias PhoenixLiveCalendar.Utils.DateHelpers
 
   # Deterministic per-person palette for multi-calendar views. Complete
@@ -105,6 +107,11 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       |> assign(:new_event_owner, nil)
       |> assign(:show_form_errors?, false)
       |> assign(:event_form, nil)
+      |> assign(:participant_sources, Sources.available_participant_sources(scope))
+      |> assign(:location_options, Sources.list_locations())
+      |> assign(:pending_participants, [])
+      |> assign(:participant_query, "")
+      |> assign(:participant_results, [])
 
     {:ok, socket}
   end
@@ -255,6 +262,49 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     {:noreply, close_modal(socket)}
   end
 
+  def handle_event("search_participants", %{"pq" => query}, socket) do
+    pending_keys = MapSet.new(socket.assigns.pending_participants, &participant_key/1)
+
+    results =
+      socket.assigns.scope
+      |> Sources.search_participants(query)
+      |> Enum.map(fn {source, results} ->
+        {source, Enum.reject(results, &MapSet.member?(pending_keys, participant_key(&1)))}
+      end)
+      |> Enum.reject(fn {_source, results} -> results == [] end)
+
+    {:noreply,
+     socket
+     |> assign(:participant_query, query)
+     |> assign(:participant_results, results)}
+  end
+
+  def handle_event("add_participant", %{"kind" => kind, "uuid" => uuid, "name" => name}, socket) do
+    # the context re-validates on save; this guard keeps the UI honest
+    if Participants.kind_allowed?(socket.assigns.scope, kind) do
+      entry = %{kind: kind, target_uuid: uuid, display_name: name}
+      {:noreply, append_participant(socket, entry)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("add_free_text_participant", _params, socket) do
+    name = String.trim(socket.assigns.participant_query)
+
+    if name == "" do
+      {:noreply, socket}
+    else
+      entry = %{kind: "free_text", target_uuid: nil, display_name: name}
+      {:noreply, append_participant(socket, entry)}
+    end
+  end
+
+  def handle_event("remove_participant", %{"idx" => idx}, socket) do
+    pending = List.delete_at(socket.assigns.pending_participants, String.to_integer(idx))
+    {:noreply, assign(socket, :pending_participants, pending)}
+  end
+
   def handle_event("validate_event", %{"event" => event_params} = params, socket) do
     # phx-change keeps the form synced (the all-day toggle swaps the
     # date/datetime inputs; the owner picker drives the off-view warning),
@@ -265,7 +315,11 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
     changeset =
       (socket.assigns.editing_event || %Event{})
-      |> Event.changeset(normalize_params(event_params))
+      |> Event.changeset(
+        event_params
+        |> normalize_params()
+        |> link_location(socket.assigns.location_options)
+      )
       |> Map.put(:action, action)
 
     {:noreply,
@@ -276,7 +330,9 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
   def handle_event("save_event", %{"event" => event_params} = params, socket) do
     %{scope: scope, editing_event: editing} = socket.assigns
-    event_params = normalize_params(event_params)
+
+    event_params =
+      event_params |> normalize_params() |> link_location(socket.assigns.location_options)
 
     result =
       case editing do
@@ -295,7 +351,9 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       end
 
     case result do
-      {:ok, _event} ->
+      {:ok, event} ->
+        socket = save_participants(socket, event)
+
         {:noreply,
          socket
          |> put_flash(:info, Gettext.gettext(PhoenixKitWeb.Gettext, "Event saved"))
@@ -513,11 +571,27 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
         %Event{} -> Events.can_edit?(socket.assigns.scope, event.owner_uuid)
       end
 
+    pending =
+      case event do
+        nil ->
+          []
+
+        %Event{} = event ->
+          event.uuid
+          |> Participants.list_for_event()
+          |> Enum.map(
+            &%{kind: &1.kind, target_uuid: &1.target_uuid, display_name: &1.display_name}
+          )
+      end
+
     socket
     |> assign(:editing_event, event)
     |> assign(:can_edit_event?, can_edit_event?)
     |> assign(:new_event_owner, if(is_nil(event), do: default_new_owner(socket)))
     |> assign(:show_form_errors?, false)
+    |> assign(:pending_participants, pending)
+    |> assign(:participant_query, "")
+    |> assign(:participant_results, [])
     |> assign(:event_form, to_form(inclusive_end(changeset), as: "event"))
     |> assign(:show_event_modal, true)
   end
@@ -552,6 +626,9 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     |> assign(:can_edit_event?, false)
     |> assign(:new_event_owner, nil)
     |> assign(:show_form_errors?, false)
+    |> assign(:pending_participants, [])
+    |> assign(:participant_query, "")
+    |> assign(:participant_results, [])
     |> assign(:event_form, nil)
   end
 
@@ -574,6 +651,63 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   end
 
   defp normalize_params(params), do: params
+
+  # When the typed location exactly matches a stored location's name (the
+  # datalist suggestion was picked), link it; any other text clears the link
+  # and stays free-form. The context re-snapshots the name from the uuid.
+  defp link_location(params, location_options) do
+    case Enum.find(location_options, &(&1.name == String.trim(params["location"] || ""))) do
+      nil -> Map.put(params, "location_uuid", nil)
+      loc -> Map.put(params, "location_uuid", loc.uuid)
+    end
+  end
+
+  defp participant_key(%{kind: "free_text", display_name: name}),
+    do: {"free_text", String.downcase(name)}
+
+  defp participant_key(%{kind: kind, target_uuid: target}), do: {kind, to_string(target)}
+
+  defp append_participant(socket, entry) do
+    pending = socket.assigns.pending_participants
+    keys = MapSet.new(pending, &participant_key/1)
+
+    pending =
+      if MapSet.member?(keys, participant_key(entry)), do: pending, else: pending ++ [entry]
+
+    socket
+    |> assign(:pending_participants, pending)
+    |> assign(:participant_query, "")
+    |> assign(:participant_results, [])
+  end
+
+  defp save_participants(socket, event) do
+    case Participants.replace_participants(
+           socket.assigns.scope,
+           event,
+           socket.assigns.pending_participants
+         ) do
+      {:ok, _} ->
+        socket
+
+      {:error, _} ->
+        put_flash(
+          socket,
+          :error,
+          Gettext.gettext(PhoenixKitWeb.Gettext, "Some participants could not be saved")
+        )
+    end
+  end
+
+  defp kind_icon("user"), do: "hero-user"
+  defp kind_icon("staff_person"), do: "hero-identification"
+  defp kind_icon("crm_contact"), do: "hero-user-circle"
+  defp kind_icon("crm_company"), do: "hero-building-office"
+  defp kind_icon(_free_text), do: "hero-pencil"
+
+  defp source_label(:users), do: Gettext.gettext(PhoenixKitWeb.Gettext, "Users")
+  defp source_label(:staff), do: Gettext.gettext(PhoenixKitWeb.Gettext, "Staff")
+  defp source_label(:crm_contacts), do: Gettext.gettext(PhoenixKitWeb.Gettext, "CRM contacts")
+  defp source_label(:crm_companies), do: Gettext.gettext(PhoenixKitWeb.Gettext, "CRM companies")
 
   # ── Display helpers ─────────────────────────────────────────────────────────
 
@@ -784,7 +918,11 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
             <.input
               field={@event_form[:location]}
               label={Gettext.gettext(PhoenixKitWeb.Gettext, "Location")}
+              list={@location_options != [] && "calendar-location-options"}
             />
+            <datalist :if={@location_options != []} id="calendar-location-options">
+              <option :for={loc <- @location_options} value={loc.name}></option>
+            </datalist>
             <.textarea
               field={@event_form[:description]}
               label={Gettext.gettext(PhoenixKitWeb.Gettext, "Description")}
@@ -804,6 +942,92 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
               />
             </div>
           </.form>
+          <%!-- Participants (outside the event form — chips + search live in
+               assigns, saved via replace_participants after the event) --%>
+          <div class="mt-4 space-y-2">
+            <p class="label-text font-semibold">
+              {Gettext.gettext(PhoenixKitWeb.Gettext, "Participants")}
+            </p>
+
+            <div :if={@pending_participants != []} class="flex flex-wrap gap-1.5">
+              <span
+                :for={{p, idx} <- Enum.with_index(@pending_participants)}
+                class="badge badge-outline gap-1 py-2.5"
+              >
+                <.icon name={kind_icon(p.kind)} class="w-3 h-3" />
+                {p.display_name}
+                <span :if={p.kind == "free_text"} class="opacity-60">
+                  ({Gettext.gettext(PhoenixKitWeb.Gettext, "won't see this event")})
+                </span>
+                <button
+                  type="button"
+                  phx-click="remove_participant"
+                  phx-value-idx={idx}
+                  aria-label={Gettext.gettext(PhoenixKitWeb.Gettext, "Remove participant")}
+                  class="cursor-pointer hover:text-error"
+                >
+                  <.icon name="hero-x-mark" class="w-3 h-3" />
+                </button>
+              </span>
+            </div>
+
+            <form
+              id="calendar-participant-search"
+              phx-change="search_participants"
+              phx-submit="add_free_text_participant"
+              class="group/psearch"
+            >
+              <label class="input input-sm w-full">
+                <.icon name="hero-user-plus" class="w-4 h-4 opacity-50" />
+                <input
+                  type="text"
+                  name="pq"
+                  value={@participant_query}
+                  phx-debounce="300"
+                  placeholder={Gettext.gettext(PhoenixKitWeb.Gettext, "Add participants…")}
+                  autocomplete="off"
+                />
+                <span class="loading loading-spinner loading-xs invisible [.phx-change-loading_&]:visible" />
+              </label>
+            </form>
+
+            <div
+              :if={@participant_results != [] or String.trim(@participant_query) != ""}
+              class="border border-base-content/10 rounded-lg divide-y divide-base-content/5 max-h-52 overflow-y-auto"
+            >
+              <div :for={{source, results} <- @participant_results}>
+                <p class="px-2 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wide text-base-content/50">
+                  {source_label(source)}
+                </p>
+                <button
+                  :for={result <- results}
+                  type="button"
+                  phx-click="add_participant"
+                  phx-value-kind={result.kind}
+                  phx-value-uuid={result.target_uuid}
+                  phx-value-name={result.display_name}
+                  class="w-full text-left px-2 py-1.5 hover:bg-base-200 text-sm flex items-center gap-2"
+                >
+                  <.icon name={kind_icon(result.kind)} class="w-4 h-4 opacity-60" />
+                  {result.display_name}
+                </button>
+              </div>
+              <button
+                :if={String.trim(@participant_query) != ""}
+                type="button"
+                phx-click="add_free_text_participant"
+                class="w-full text-left px-2 py-1.5 hover:bg-base-200 text-sm flex items-center gap-2 text-base-content/70"
+              >
+                <.icon name="hero-plus" class="w-4 h-4" />
+                {Gettext.gettext(PhoenixKitWeb.Gettext, "Add \"%{name}\" as text",
+                  name: String.trim(@participant_query)
+                )}
+                <span class="text-xs opacity-60">
+                  ({Gettext.gettext(PhoenixKitWeb.Gettext, "won't see this event")})
+                </span>
+              </button>
+            </div>
+          </div>
         <% else %>
           <%!-- Read-only details for view_others-without-edit --%>
           <div :if={@editing_event} class="space-y-2">
@@ -818,6 +1042,21 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
             <span :if={@editing_event.status == "cancelled"} class="badge badge-error badge-outline">
               {Gettext.gettext(PhoenixKitWeb.Gettext, "Cancelled")}
             </span>
+
+            <div :if={@pending_participants != []} class="pt-2">
+              <p class="text-xs uppercase tracking-wide text-base-content/50 mb-1">
+                {Gettext.gettext(PhoenixKitWeb.Gettext, "Participants")}
+              </p>
+              <div class="flex flex-wrap gap-1.5">
+                <span
+                  :for={p <- @pending_participants}
+                  class="badge badge-outline gap-1"
+                >
+                  <.icon name={kind_icon(p.kind)} class="w-3 h-3" />
+                  {p.display_name}
+                </span>
+              </div>
+            </div>
           </div>
         <% end %>
 

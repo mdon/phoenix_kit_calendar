@@ -7,14 +7,21 @@ defmodule PhoenixKitCalendarTest do
       assert PhoenixKitCalendar.module_name() == "Calendar"
     end
 
-    test "permission_metadata/0 declares the base key and both sub-permissions" do
+    test "permission_metadata/0 declares the base key and all sub-permissions" do
       meta = PhoenixKitCalendar.permission_metadata()
 
       assert meta.key == "calendar"
       assert meta.icon == "hero-calendar-days"
 
       sub_keys = Enum.map(meta.sub_permissions, & &1.key)
-      assert sub_keys == ["view_others", "edit_others"]
+
+      assert sub_keys == [
+               "view_others",
+               "edit_others",
+               "invite_platform_users",
+               "invite_staff",
+               "invite_crm"
+             ]
 
       assert Enum.all?(meta.sub_permissions, fn sub ->
                is_binary(sub.label) and is_binary(sub.description)

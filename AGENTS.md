@@ -19,7 +19,7 @@
 
 ## Data model
 
-`phoenix_kit_calendar_events` — core migration **V141** (tables live in core, workspace convention). UUIDv7 PK, `owner_uuid` FK → users (`ON DELETE CASCADE` — a personal calendar follows its account). Ends are EXCLUSIVE (`[start, end)`, iCal-style, matching `phoenix_live_calendar`):
+`phoenix_kit_calendar_events` + `phoenix_kit_calendar_event_participants` — core migration **V141** (tables live in core, workspace convention; **V141 is edited IN PLACE while unreleased** — Max's rule: no new migrations for calendar schema until release; statements are idempotent-additive and already-migrated DBs roll the marker back one version and re-run). UUIDv7 PK, `owner_uuid` FK → users (`ON DELETE CASCADE` — a personal calendar follows its account). Ends are EXCLUSIVE (`[start, end)`, iCal-style, matching `phoenix_live_calendar`):
 
 - Timed events: `starts_at`/`ends_at` (`utc_datetime`).
 - All-day events: `starts_on`/`ends_on` (DATE pair — real date semantics, no UTC-midnight/DST ambiguity).
@@ -38,6 +38,16 @@
 - **Owner color replaces title prefixes**: multi-calendar views tint events with the owner's palette color (`owner_color/1` — `phash2(uuid, 12)` into complete static Tailwind classes, purge-safe); single-calendar views keep each event's own chosen color. The modal shows the owner (dot + name) for every event.
 - **Editing**: per-event authorization at modal-open (`can_edit_event?` vs the event's persisted owner) from ANY view. Read-only badge: single non-editable selection, or multi without `edit_others`.
 - **Creating (boss's ask 2026-07-09: "New event must not go away")**: the button is ALWAYS available. The create modal carries a **target-calendar picker** for `edit_others` holders (`name="owner"` — deliberately OUTSIDE the changeset; owner is never cast, `sanitize_owner/2` clamps unknown/unauthorized values to self, and the context re-authorizes the explicit argument). Without `edit_others` the modal states "On your calendar" and any crafted owner param is sanitized to self (regression-tested). Default target = the single viewed calendar when editable, else self. **If the target isn't in the current view, an inline warning says the event won't appear here** (covers both a boss picking an off-view person and a read-only viewer creating for themselves while looking at someone else).
+
+## Cross-module integrations (2026-07-09, quorum-reviewed)
+
+**Standalone by construction:** every integration reads the PHYSICAL sibling tables (they exist in every install via core migrations) with SCHEMALESS queries — no sibling module code is ever required; unused modules mean empty tables mean no-ops. A source is OFFERED only when its module is enabled AND the viewer holds the invite sub-permission (composes, never substitutes).
+
+- **Location** — the form's location input gains datalist suggestions from `phoenix_kit_locations` when that module is enabled; exact-match text links `location_uuid`, and the context snapshots the NAME into the `location` string (rendering never needs the module; unknown uuids are dropped, free text always works).
+- **Participants** — `Participants.replace_participants/3` (full-replace-with-diff, one transaction; removal revokes instantly; only NEWLY added entries notify via Activity `target_uuid` → core notifications). Kinds: `user` / `staff_person` / `crm_contact` / `crm_company` / `free_text`; per-kind gating via the three invite subs (`invite_platform_users` / `invite_staff` / `invite_crm` — quorum split; free text needs only event edit access), validated in the CONTEXT, not just the UI. `added_by_uuid` audits.
+- **LIVE visibility (Max's explicit choice over save-time snapshots):** a person's schedule = events they OWN plus events they currently RESOLVE as participating in — `participant_visible_dynamic/1` is one EXISTS fragment joining `phoenix_kit_staff_people` (user_uuid link), `phoenix_kit_crm_contacts` (optional user_uuid), and company MEMBERSHIPS (company participant = whoever is a member NOW; joining a company grants visibility to existing events, leaving revokes it — regression-tested by mutating membership rows directly). Participants may open THEIR event (`Events.participant?/2` path in `get_event/2`) but never the owner's calendar. `display_name` is the only snapshot; soft-deleted (trashed) staff/contacts don't resolve.
+- **Picker UI** — search field in the modal (debounced, min 2 chars, 8 results/source, name-only results), grouped by source, chips with kind icons; free-text chips are explicitly marked "won't see this event" (people otherwise believe typing a name invites them).
+- The participants test suite seeds the physical staff/CRM/locations tables schemaless with NO module code loaded — that is the standalone proof, keep it that way.
 
 ## Dashboard widget
 

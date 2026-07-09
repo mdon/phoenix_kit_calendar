@@ -129,6 +129,21 @@ defmodule PhoenixKitCalendar do
           key: "edit_others",
           label: "Edit others' calendars",
           description: "Create, edit, and delete events on other users' calendars"
+        },
+        %{
+          key: "invite_platform_users",
+          label: "Invite platform users",
+          description: "Add platform users as event participants"
+        },
+        %{
+          key: "invite_staff",
+          label: "Invite staff",
+          description: "Add staff people as event participants"
+        },
+        %{
+          key: "invite_crm",
+          label: "Invite CRM contacts",
+          description: "Add CRM contacts and companies as event participants"
         }
       ]
     }
