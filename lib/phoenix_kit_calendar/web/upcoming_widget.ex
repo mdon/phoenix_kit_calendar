@@ -30,6 +30,7 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
      |> assign(:id, assigns.id)
      |> assign(:show_location, Map.get(settings, "show_location", true) in [true, "true"])
      |> assign(:compact, compact?(assigns[:size]))
+     |> assign(:viewer_tz, viewer_tz(scope))
      |> assign(:events, upcoming_events(scope, limit))}
   end
 
@@ -50,6 +51,18 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
     end
   rescue
     _ -> []
+  end
+
+  # Offset-hours string: viewer's setting → site "time_zone" → "0". The
+  # widget shows wall-clock times in the viewer's frame (storage is UTC).
+  defp viewer_tz(scope) do
+    case scope && scope.user do
+      %{user_timezone: tz} when is_binary(tz) and tz != "" -> tz
+      %{} = user -> PhoenixKit.Utils.Date.get_user_timezone(user)
+      _ -> "0"
+    end
+  rescue
+    _ -> "0"
   end
 
   defp past?(%Event{all_day: true} = event, _now, today),
@@ -93,7 +106,7 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
               <div class="min-w-0">
                 <p class="text-sm font-medium truncate">{event.title}</p>
                 <p class="text-xs text-base-content/60 truncate">
-                  {when_label(event)}<span :if={@show_location && event.location}>
+                  {when_label(event, @viewer_tz)}<span :if={@show_location && event.location}>
                     · {event.location}</span>
                 </p>
               </div>
@@ -105,7 +118,7 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
     """
   end
 
-  defp when_label(%Event{all_day: true} = event) do
+  defp when_label(%Event{all_day: true} = event, _tz) do
     last_day = Date.add(event.ends_on, -1)
 
     if Date.compare(event.starts_on, last_day) == :eq do
@@ -115,7 +128,9 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
     end
   end
 
-  defp when_label(%Event{} = event) do
-    Calendar.strftime(event.starts_at, "%b %d, %H:%M")
+  defp when_label(%Event{} = event, tz) do
+    event.starts_at
+    |> PhoenixKit.Utils.Date.shift_to_offset(tz)
+    |> Calendar.strftime("%b %d, %H:%M")
   end
 end

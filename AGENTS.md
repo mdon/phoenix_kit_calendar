@@ -25,7 +25,8 @@
 - All-day events: `starts_on`/`ends_on` (DATE pair — real date semantics, no UTC-midnight/DST ambiguity).
 - DB CHECK `calendar_event_time_shape` enforces exactly one pair per row matching `all_day`, end > start on both; the changeset nils the inactive pair when `all_day` flips so form toggling can't trip it.
 - `status`: `confirmed`/`cancelled` (CHECK-enforced). `color`: whitelisted daisyUI `bg-*` classes only (never arbitrary CSS).
-- **v1 simplifications (deliberate):** no recurrence; timed events are naive wall-clock stored as UTC verbatim (no timezone conversion); no separate calendars table.
+- **Timezones (2026-07-09):** timed events are stored in true UTC and displayed/entered in the VIEWER's timezone — core's offset-hours model via `user_timezone` → site `"time_zone"` setting → "0" (`PhoenixKit.Utils.Date.get_user_timezone/1`, `parse_datetime_local/2`, `format_datetime_local/2`, `shift_to_offset/2`; offsets are DST-naive, no IANA db in core). The LV keeps an "input frame" (`@input_tz`): the changeset always holds UTC; `localize_times/2` converts typed wall-clock → UTC using the frame the values were DISPLAYED in (convert with the old frame BEFORE recomputing it, or the checkbox toggle would shift the instant); `datetime_local_value/2` converts back at render (handles both cast DateTimes and raw ISO params — FormField.value prefers params). Cross-timezone: when the target owner's offset differs from the viewer's, the modal shows an indicator + "Use their timezone" checkbox (`owner_tz_entry`, outside the changeset) that switches the display/entry frame — same instant, different digits. Grid (`to_lib_event/3`), read-only view (`event_when/2`) and the widget all shift by the viewer's offset.
+- **v1 simplifications (deliberate):** no recurrence; no separate calendars table.
 
 ## UI
 

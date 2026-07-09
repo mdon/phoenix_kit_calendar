@@ -87,11 +87,16 @@ defmodule PhoenixKitCalendar.LiveCase do
     roles = Keyword.get(opts, :roles, ["User"])
     permissions = Keyword.get(opts, :permissions, ["calendar"])
     authenticated? = Keyword.get(opts, :authenticated?, true)
+    user_timezone = Keyword.get(opts, :user_timezone)
 
     # A real %User{} struct (not a bare map): Scope.user_uuid/1 and friends
     # pattern-match on it. cached_roles is a LIST of role-name strings,
     # mirroring what Scope.for_user/1 builds in production.
-    user = %PhoenixKit.Users.Auth.User{uuid: user_uuid, email: email}
+    user = %PhoenixKit.Users.Auth.User{
+      uuid: user_uuid,
+      email: email,
+      user_timezone: user_timezone
+    }
 
     %PhoenixKit.Users.Auth.Scope{
       user: user,

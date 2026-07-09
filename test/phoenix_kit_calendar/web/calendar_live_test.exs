@@ -1,6 +1,8 @@
 defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
   use PhoenixKitCalendar.LiveCase, async: false
 
+  import Ecto.Query, only: [from: 2]
+
   alias PhoenixKit.Users.Auth
   alias PhoenixKitCalendar.Events
   alias PhoenixKitCalendar.Test.Repo, as: TestRepo
@@ -494,6 +496,136 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
 
       {:ok, _view, html} = live(conn2, "#{@path}?people=#{other.uuid},#{me.uuid}")
       refute html =~ "Secret standup"
+    end
+  end
+
+  describe "timezones (UTC storage, viewer-frame display)" do
+    test "typed times are the viewer's local; storage is UTC; display round-trips",
+         %{conn: conn, me: me} do
+      conn =
+        put_test_scope(
+          conn,
+          fake_scope(user_uuid: me.uuid, permissions: ["calendar"], user_timezone: "3")
+        )
+
+      {:ok, view, _} = live(conn, @path)
+
+      view |> element("button", "New event") |> render_click()
+      today = Date.to_iso8601(Date.utc_today())
+
+      view
+      |> form("#calendar-event-form", %{
+        "event" => %{
+          "title" => "Morning sync",
+          "all_day" => "false",
+          "starts_at" => "#{today}T09:00",
+          "ends_at" => "#{today}T10:00"
+        }
+      })
+      |> render_submit()
+
+      {:ok, [event]} =
+        Events.list_events(
+          scope_of(me, ["calendar"]),
+          me.uuid,
+          Date.add(Date.utc_today(), -35),
+          Date.add(Date.utc_today(), 35)
+        )
+
+      # 09:00 at UTC+3 = 06:00 UTC in storage
+      assert event.starts_at == DateTime.new!(Date.utc_today(), ~T[06:00:00], "Etc/UTC")
+
+      # ...and the edit form shows 09:00 again (viewer frame)
+      send(view.pid, {:calendar_event_click, event.uuid})
+      html = render(view)
+      assert html =~ ~s(value="#{today}T09:00")
+    end
+
+    test "editing another person's calendar shows the cross-timezone indicator + frame switch",
+         %{conn: conn, me: me, other: other} do
+      # the target owner lives at UTC+1 (persisted), the editor at UTC+3
+      {:ok, other_bin} = Ecto.UUID.dump(other.uuid)
+
+      TestRepo.update_all(
+        from(u in "phoenix_kit_users", where: u.uuid == ^other_bin),
+        set: [user_timezone: "1"]
+      )
+
+      event =
+        Events.create_event(scope_of(other, ["calendar"]), other.uuid, %{
+          "title" => "Their standup",
+          "starts_at" => DateTime.new!(Date.utc_today(), ~T[06:00:00], "Etc/UTC"),
+          "ends_at" => DateTime.new!(Date.utc_today(), ~T[07:00:00], "Etc/UTC")
+        })
+        |> then(fn {:ok, e} -> e end)
+
+      conn =
+        put_test_scope(
+          conn,
+          fake_scope(
+            user_uuid: me.uuid,
+            permissions: ["calendar", "calendar.view_others", "calendar.edit_others"],
+            user_timezone: "3"
+          )
+        )
+
+      {:ok, view, _} = live(conn, @path)
+      send(view.pid, {:calendar_event_click, event.uuid})
+      html = render(view)
+
+      today = Date.to_iso8601(Date.utc_today())
+      # indicator names both offsets; times default to the VIEWER's frame
+      assert html =~ "UTC+1"
+      assert html =~ "UTC+3"
+      assert html =~ ~s(name="owner_tz_entry")
+      assert html =~ ~s(value="#{today}T09:00")
+
+      # switching to the owner's frame re-renders the SAME instant at UTC+1
+      html =
+        view
+        |> form("#calendar-event-form", %{
+          "owner_tz_entry" => "true",
+          "event" => %{
+            "title" => "Their standup",
+            "all_day" => "false",
+            "starts_at" => "#{today}T09:00",
+            "ends_at" => "#{today}T10:00"
+          }
+        })
+        |> render_change()
+
+      assert html =~ ~s(value="#{today}T07:00")
+
+      # saving what the form shows (owner frame) keeps the stored instant
+      view
+      |> form("#calendar-event-form", %{
+        "owner_tz_entry" => "true",
+        "event" => %{
+          "title" => "Their standup",
+          "all_day" => "false",
+          "starts_at" => "#{today}T07:00",
+          "ends_at" => "#{today}T08:00"
+        }
+      })
+      |> render_submit()
+
+      {:ok, saved} =
+        Events.get_event(scope_of(me, ["calendar", "calendar.edit_others"]), event.uuid)
+
+      assert saved.starts_at == DateTime.new!(Date.utc_today(), ~T[06:00:00], "Etc/UTC")
+    end
+
+    test "same-timezone calendars show no indicator", %{conn: conn, me: me} do
+      conn =
+        put_test_scope(
+          conn,
+          fake_scope(user_uuid: me.uuid, permissions: ["calendar"], user_timezone: "3")
+        )
+
+      {:ok, view, _} = live(conn, @path)
+
+      view |> element("button", "New event") |> render_click()
+      refute render(view) =~ ~s(name="owner_tz_entry")
     end
   end
 

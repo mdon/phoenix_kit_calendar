@@ -389,12 +389,7 @@ defmodule PhoenixKitCalendar.Events do
         |> repo().all()
         |> Map.new()
 
-      Enum.map(events, fn event ->
-        case event.location_uuid && Map.get(names, event.location_uuid) do
-          name when is_binary(name) and name != "" -> %{event | location: name}
-          _ -> event
-        end
-      end)
+      Enum.map(events, &put_live_location(&1, names))
     end
   rescue
     # a failed lookup must never break listing — the snapshots suffice
@@ -403,6 +398,13 @@ defmodule PhoenixKitCalendar.Events do
 
   defp resolve_live_locations(%Event{} = event) do
     [event] |> resolve_live_locations() |> hd()
+  end
+
+  defp put_live_location(event, names) do
+    case event.location_uuid && Map.get(names, event.location_uuid) do
+      name when is_binary(name) and name != "" -> %{event | location: name}
+      _ -> event
+    end
   end
 
   # Snapshot the picked location's name into the free-text column so

@@ -35,11 +35,16 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   without it you get read-only details. Creating needs exactly one
   selected calendar you may edit.
 
-  ## Time semantics (v1)
+  ## Time semantics
 
-  Timed events are naive wall-clock stored as UTC verbatim. All-day
-  events use real dates; the form's end date is INCLUSIVE ("last day")
-  and shifted to the exclusive storage form at this boundary.
+  Timed events are stored in UTC and shown/entered in the viewer's
+  timezone (core's offset-hours model: `user_timezone` column → site
+  "time_zone" setting → UTC). When the target calendar's owner sits in a
+  different offset, the modal says so and offers a checkbox to switch
+  the entry frame to THEIR timezone — toggling re-renders the same
+  instant, never reinterprets the digits. All-day events use real dates
+  (no timezone); the form's end date is INCLUSIVE ("last day") and
+  shifted to the exclusive storage form at this boundary.
   """
   use PhoenixKitWeb, :live_view
 
@@ -50,6 +55,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   alias PhoenixKit.Users.Auth.Scope
   alias PhoenixKit.Users.Permissions
   alias PhoenixKit.Users.Roles
+  alias PhoenixKit.Utils.Date, as: DateUtils
   alias PhoenixKitCalendar.Events
   alias PhoenixKitCalendar.Participants
   alias PhoenixKitCalendar.Paths
@@ -99,16 +105,24 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
     can_edit_others? = Scope.can?(scope, "calendar.edit_others")
 
+    # Offset-hours strings, core's timezone model (user column → site
+    # "time_zone" setting → "0"). Storage is UTC; every wall-clock the
+    # viewer sees or types is converted through these.
+    site_tz = site_timezone()
+    viewer_tz = viewer_timezone(scope, site_tz)
+
     socket =
       socket
       |> assign(:page_title, Gettext.gettext(PhoenixKitWeb.Gettext, "Calendar"))
       |> assign(:scope, scope)
       |> assign(:own_uuid, own_uuid)
+      |> assign(:site_tz, site_tz)
+      |> assign(:viewer_tz, viewer_tz)
       |> assign(:today, today)
       |> assign(:window, {from, until})
       |> assign(:can_view_others?, can_view_others?)
       |> assign(:can_edit_others?, can_edit_others?)
-      |> assign(:people, if(can_view_others?, do: load_people(), else: []))
+      |> assign(:people, if(can_view_others?, do: load_people(site_tz), else: []))
       |> assign(:window_counts, %{})
       |> assign(:people_query, "")
       |> assign(:show_event_modal, false)
@@ -117,6 +131,10 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       |> assign(:new_event_owner, nil)
       |> assign(:show_form_errors?, false)
       |> assign(:event_form, nil)
+      |> assign(:input_tz, viewer_tz)
+      |> assign(:modal_owner_tz, viewer_tz)
+      |> assign(:owner_tz_differs?, false)
+      |> assign(:enter_in_owner_tz?, false)
       |> assign(:participant_sources, Sources.available_participant_sources(scope))
       |> assign(:location_options, Sources.list_locations())
       |> assign(:pending_participants, [])
@@ -202,11 +220,16 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   end
 
   def handle_info({:calendar_date_click, %Date{} = date}, socket) do
+    # default 09:00–10:00 in the VIEWER's timezone, stored as UTC
+    tz = socket.assigns.viewer_tz
+    {:ok, starts_at} = DateUtils.parse_datetime_local("#{Date.to_iso8601(date)}T09:00", tz)
+    {:ok, ends_at} = DateUtils.parse_datetime_local("#{Date.to_iso8601(date)}T10:00", tz)
+
     changeset =
       Event.changeset(%Event{}, %{
         "all_day" => "false",
-        "starts_at" => DateTime.new!(date, ~T[09:00:00], "Etc/UTC"),
-        "ends_at" => DateTime.new!(date, ~T[10:00:00], "Etc/UTC")
+        "starts_at" => starts_at,
+        "ends_at" => ends_at
       })
 
     {:noreply, open_modal(socket, nil, changeset)}
@@ -382,11 +405,17 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     # save they update live while the user fixes the form.
     action = if socket.assigns.show_form_errors?, do: :validate, else: nil
 
+    # the timed values were typed in the frame they were DISPLAYED in —
+    # convert with it BEFORE recomputing the frame, or toggling the
+    # timezone checkbox would shift the instant instead of the digits
+    entry_tz = socket.assigns.input_tz
+
     changeset =
       (socket.assigns.editing_event || %Event{})
       |> Event.changeset(
         event_params
         |> normalize_params()
+        |> localize_times(entry_tz)
         |> link_location(socket.assigns.location_options)
       )
       |> Map.put(:action, action)
@@ -394,6 +423,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     {:noreply,
      socket
      |> assign(:new_event_owner, sanitize_owner(socket, params["owner"]))
+     |> assign_tz_frame(params["owner_tz_entry"])
      |> assign(:event_form, to_form(changeset, as: "event"))}
   end
 
@@ -401,7 +431,10 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     %{scope: scope, editing_event: editing} = socket.assigns
 
     event_params =
-      event_params |> normalize_params() |> link_location(socket.assigns.location_options)
+      event_params
+      |> normalize_params()
+      |> localize_times(socket.assigns.input_tz)
+      |> link_location(socket.assigns.location_options)
 
     result =
       case editing do
@@ -523,7 +556,8 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
           end
       end
 
-    assign(socket, :calendar_events, Enum.map(events, &to_lib_event(&1, multi?)))
+    tz = socket.assigns.viewer_tz
+    assign(socket, :calendar_events, Enum.map(events, &to_lib_event(&1, multi?, tz)))
   end
 
   defp reload_window_counts(socket) do
@@ -544,7 +578,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
   # Single-calendar views keep each event's own color; multi-calendar
   # views tint by owner so a day cell reads as "who is booked".
-  defp to_lib_event(%Event{} = event, multi?) do
+  defp to_lib_event(%Event{} = event, multi?, viewer_tz) do
     {color, text_color} =
       if multi? do
         owner_color(event.owner_uuid)
@@ -552,10 +586,14 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
         {event.color, Map.get(@static_text_colors, event.color)}
       end
 
+    # timed events are stored UTC and rendered in the VIEWER's offset
+    # (display-only shift; all-day dates need none)
     {start_value, end_value} =
       if event.all_day,
         do: {event.starts_on, event.ends_on},
-        else: {event.starts_at, event.ends_at}
+        else:
+          {DateUtils.shift_to_offset(event.starts_at, viewer_tz),
+           DateUtils.shift_to_offset(event.ends_at, viewer_tz)}
 
     %PhoenixLiveCalendar.Event{
       id: event.uuid,
@@ -581,13 +619,19 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
   # All active users for the people panel — deliberately including users
   # WITHOUT calendar access (their history must stay reviewable).
-  defp load_people do
+  defp load_people(site_tz) do
     access_set = calendar_access_set()
 
     from(u in PhoenixKit.Users.Auth.User,
       where: u.is_active == true,
       order_by: [asc: u.email],
-      select: %{uuid: u.uuid, email: u.email, first_name: u.first_name, last_name: u.last_name}
+      select: %{
+        uuid: u.uuid,
+        email: u.email,
+        first_name: u.first_name,
+        last_name: u.last_name,
+        user_timezone: u.user_timezone
+      }
     )
     |> RepoHelper.repo().all()
     |> Enum.map(fn u ->
@@ -595,7 +639,9 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
         uuid: u.uuid,
         label: display_name(u),
         email: u.email,
-        has_access?: MapSet.member?(access_set, u.uuid)
+        has_access?: MapSet.member?(access_set, u.uuid),
+        # effective offset: personal setting, else the site default
+        tz: u.user_timezone || site_tz
       }
     end)
   end
@@ -666,6 +712,9 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     |> assign(:show_form_errors?, false)
     |> assign(:pending_participants, pending)
     |> assign(:event_form, to_form(changeset, as: "event"))
+    # fresh frame each open: the viewer's timezone until the checkbox opts
+    # into the owner's
+    |> assign_tz_frame(nil)
     |> assign(:show_event_modal, true)
   end
 
@@ -701,6 +750,135 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     |> assign(:show_form_errors?, false)
     |> assign(:pending_participants, [])
     |> assign(:event_form, nil)
+  end
+
+  # ── Timezones ───────────────────────────────────────────────────────────
+  #
+  # Core's model is OFFSET-HOURS STRINGS ("0", "3", "-5"): the user's
+  # `user_timezone` column, falling back to the site "time_zone" setting.
+  # Events are STORED in UTC; the form displays/accepts wall-clock in an
+  # "input frame" — normally the viewer's offset, switchable to the target
+  # calendar owner's offset when the two differ (the modal checkbox). The
+  # changeset always holds UTC, so toggling the frame re-renders the same
+  # instant in the other offset instead of silently reinterpreting digits.
+
+  defp site_timezone do
+    PhoenixKit.Settings.get_setting("time_zone", "0")
+  rescue
+    _ -> "0"
+  end
+
+  defp viewer_timezone(scope, site_tz) do
+    case scope && scope.user do
+      %{user_timezone: tz} when is_binary(tz) and tz != "" -> tz
+      _ -> site_tz
+    end
+  end
+
+  # The effective offset of a calendar owner: self → viewer; anyone else →
+  # the people list (all active users, already resolved), with a direct
+  # lookup as the fallback for completeness.
+  defp owner_timezone(socket, nil), do: socket.assigns.viewer_tz
+
+  defp owner_timezone(socket, owner_uuid) do
+    %{own_uuid: own_uuid, people: people, site_tz: site_tz} = socket.assigns
+
+    cond do
+      owner_uuid == own_uuid ->
+        socket.assigns.viewer_tz
+
+      person = Enum.find(people, &(&1.uuid == owner_uuid)) ->
+        person.tz
+
+      true ->
+        from(u in PhoenixKit.Users.Auth.User,
+          where: u.uuid == ^owner_uuid,
+          select: u.user_timezone
+        )
+        |> RepoHelper.repo().one()
+        |> case do
+          tz when is_binary(tz) and tz != "" -> tz
+          _ -> site_tz
+        end
+    end
+  rescue
+    _ -> socket.assigns.viewer_tz
+  end
+
+  defp tz_differs?(a, b), do: DateUtils.offset_to_seconds(a) != DateUtils.offset_to_seconds(b)
+
+  # Recomputes the modal's timezone frame from the current target owner +
+  # the "show in their timezone" checkbox. Runs at open and on every
+  # validate (the owner picker can change the target mid-edit).
+  defp assign_tz_frame(socket, owner_tz_entry_param) do
+    owner_uuid =
+      case socket.assigns.editing_event do
+        %Event{owner_uuid: uuid} -> uuid
+        nil -> socket.assigns.new_event_owner
+      end
+
+    owner_tz = owner_timezone(socket, owner_uuid)
+    differs? = tz_differs?(owner_tz, socket.assigns.viewer_tz)
+    enter_in_owner? = differs? and owner_tz_entry_param == "true"
+
+    socket
+    |> assign(:modal_owner_tz, owner_tz)
+    |> assign(:owner_tz_differs?, differs?)
+    |> assign(:enter_in_owner_tz?, enter_in_owner?)
+    |> assign(:input_tz, if(enter_in_owner?, do: owner_tz, else: socket.assigns.viewer_tz))
+  end
+
+  # Converts the timed pair from the input frame's wall-clock to UTC ISO
+  # strings for the changeset. `tz` MUST be the frame the values were
+  # DISPLAYED in when the user typed them (assigns.input_tz before any
+  # frame recompute), or a checkbox toggle would shift the instant.
+  defp localize_times(params, tz) do
+    params
+    |> convert_time("starts_at", tz)
+    |> convert_time("ends_at", tz)
+  end
+
+  defp convert_time(params, key, tz) do
+    case params[key] do
+      value when is_binary(value) and value != "" ->
+        case DateUtils.parse_datetime_local(value, tz) do
+          {:ok, dt} -> Map.put(params, key, DateTime.to_iso8601(dt))
+          # leave malformed input for the changeset to reject
+          _ -> params
+        end
+
+      _ ->
+        params
+    end
+  end
+
+  # UTC changeset value → the input frame's wall-clock for datetime-local.
+  # Mid-edit the form field yields the raw PARAM (the UTC ISO string that
+  # localize_times produced) rather than the cast DateTime — parse those
+  # too. A string WITHOUT an offset is unconverted junk from a failed
+  # parse; show it as typed so the user can correct it.
+  defp datetime_local_value(%DateTime{} = dt, tz), do: DateUtils.format_datetime_local(dt, tz)
+
+  defp datetime_local_value(value, tz) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _offset} -> DateUtils.format_datetime_local(dt, tz)
+      _ -> value
+    end
+  end
+
+  defp datetime_local_value(value, _tz), do: value
+
+  # "+3" / "0" / "-5.5" → a compact UTC±N label for the indicator row.
+  defp tz_label(tz) do
+    case Float.parse(to_string(tz)) do
+      {h, _} when h > 0 -> "UTC+#{format_offset(h)}"
+      {h, _} when h < 0 -> "UTC-#{format_offset(abs(h))}"
+      _ -> "UTC"
+    end
+  end
+
+  defp format_offset(h) do
+    if h == trunc(h), do: Integer.to_string(trunc(h)), else: Float.to_string(h)
   end
 
   # (The changeset always holds the EXCLUSIVE end — the inclusive "last
@@ -1090,16 +1268,56 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
               </div>
             <% else %>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <%!-- stored in UTC; shown/typed in the input frame --%>
                 <.input
                   field={@event_form[:starts_at]}
                   type="datetime-local"
+                  value={datetime_local_value(@event_form[:starts_at].value, @input_tz)}
                   label={Gettext.gettext(PhoenixKitWeb.Gettext, "Starts")}
                 />
                 <.input
                   field={@event_form[:ends_at]}
                   type="datetime-local"
+                  value={datetime_local_value(@event_form[:ends_at].value, @input_tz)}
                   label={Gettext.gettext(PhoenixKitWeb.Gettext, "Ends")}
                 />
+              </div>
+
+              <%!-- Cross-timezone indicator: only when the target calendar's
+                   owner sits in a different offset than the viewer. The
+                   checkbox switches the frame the times above are shown and
+                   entered in — the stored instant never changes on toggle. --%>
+              <div :if={@owner_tz_differs?} class="alert alert-info py-2 text-sm flex-wrap gap-2">
+                <.icon name="hero-clock" class="w-4 h-4 shrink-0" />
+                <span>
+                  {Gettext.gettext(
+                    PhoenixKitWeb.Gettext,
+                    "%{name} is in %{owner_tz} — you are in %{viewer_tz}. Times are shown in %{frame}.",
+                    name:
+                      owner_label(
+                        @people,
+                        @own_uuid,
+                        (@editing_event && @editing_event.owner_uuid) || @new_event_owner
+                      ),
+                    owner_tz: tz_label(@modal_owner_tz),
+                    viewer_tz: tz_label(@viewer_tz),
+                    frame:
+                      if(@enter_in_owner_tz?,
+                        do: Gettext.gettext(PhoenixKitWeb.Gettext, "their timezone"),
+                        else: Gettext.gettext(PhoenixKitWeb.Gettext, "your timezone")
+                      )
+                  )}
+                </span>
+                <label class="flex items-center gap-2 cursor-pointer whitespace-nowrap">
+                  <input
+                    type="checkbox"
+                    name="owner_tz_entry"
+                    value="true"
+                    checked={@enter_in_owner_tz?}
+                    class="checkbox checkbox-xs"
+                  />
+                  {Gettext.gettext(PhoenixKitWeb.Gettext, "Use their timezone")}
+                </label>
               </div>
             <% end %>
 
@@ -1255,7 +1473,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
           <%!-- Read-only details for view_others-without-edit --%>
           <div :if={@editing_event} class="space-y-2">
             <p class="text-lg font-semibold">{@editing_event.title}</p>
-            <p class="text-sm text-base-content/70">{event_when(@editing_event)}</p>
+            <p class="text-sm text-base-content/70">{event_when(@editing_event, @viewer_tz)}</p>
             <p :if={@editing_event.location} class="text-sm">
               <.icon name="hero-map-pin" class="w-4 h-4 inline-block" /> {@editing_event.location}
             </p>
@@ -1462,7 +1680,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     """
   end
 
-  defp event_when(%Event{all_day: true} = event) do
+  defp event_when(%Event{all_day: true} = event, _tz) do
     last_day = Date.add(event.ends_on, -1)
 
     if Date.compare(event.starts_on, last_day) == :eq do
@@ -1472,8 +1690,10 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     end
   end
 
-  defp event_when(%Event{} = event) do
-    "#{Calendar.strftime(event.starts_at, "%Y-%m-%d %H:%M")} – #{Calendar.strftime(event.ends_at, "%H:%M")}"
+  defp event_when(%Event{} = event, tz) do
+    starts = DateUtils.shift_to_offset(event.starts_at, tz)
+    ends = DateUtils.shift_to_offset(event.ends_at, tz)
+    "#{Calendar.strftime(starts, "%Y-%m-%d %H:%M")} – #{Calendar.strftime(ends, "%H:%M")}"
   end
 
   # Swatch choices for the color picker: value "" is the Default (no stored
