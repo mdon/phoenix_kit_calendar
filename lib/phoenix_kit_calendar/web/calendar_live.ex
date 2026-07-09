@@ -45,6 +45,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
   import Ecto.Query, only: [from: 2]
 
+  alias Phoenix.LiveView.JS
   alias PhoenixKit.RepoHelper
   alias PhoenixKit.Users.Auth.Scope
   alias PhoenixKit.Users.Permissions
@@ -76,6 +77,15 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
   # Rendered rows are capped; past this the panel asks to refine the search.
   @panel_row_cap 50
+
+  # Explicit text pairing for the static (non-daisyUI) event colors — the
+  # lib's Safe.infer_text_color/1 only knows the semantic set.
+  @static_text_colors %{
+    "bg-orange-600" => "text-white",
+    "bg-pink-500" => "text-white",
+    "bg-violet-600" => "text-white",
+    "bg-lime-600" => "text-black"
+  }
 
   @impl true
   def mount(_params, _session, socket) do
@@ -110,8 +120,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       |> assign(:participant_sources, Sources.available_participant_sources(scope))
       |> assign(:location_options, Sources.list_locations())
       |> assign(:pending_participants, [])
-      |> assign(:participant_query, "")
-      |> assign(:participant_results, [])
 
     {:ok, socket}
   end
@@ -210,8 +218,12 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
         {:noreply, open_modal(socket, event, Event.changeset(event, %{}))}
 
       {:error, _} ->
+        # the click already opened the kept-in-DOM dialog client-side —
+        # tell it to close since there is nothing to show
         {:noreply,
-         put_flash(socket, :error, Gettext.gettext(PhoenixKitWeb.Gettext, "Event not found"))}
+         socket
+         |> push_event("pk:dialog-close", %{id: "calendar-event-modal"})
+         |> put_flash(:error, Gettext.gettext(PhoenixKitWeb.Gettext, "Event not found"))}
     end
   end
 
@@ -262,45 +274,92 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     {:noreply, close_modal(socket)}
   end
 
-  def handle_event("search_participants", %{"pq" => query}, socket) do
+  # Both pickers are core SearchPicker hooks: the dropdown is client-rendered
+  # (instant); these handlers only run the search and answer via push_event.
+  def handle_event("participant_search", %{"q" => query}, socket) when is_binary(query) do
+    query = String.trim(query)
     pending_keys = MapSet.new(socket.assigns.pending_participants, &participant_key/1)
 
     results =
       socket.assigns.scope
       |> Sources.search_participants(query)
-      |> Enum.map(fn {source, results} ->
-        {source, Enum.reject(results, &MapSet.member?(pending_keys, participant_key(&1)))}
+      |> Enum.flat_map(fn {source, results} ->
+        results
+        |> Enum.reject(&MapSet.member?(pending_keys, participant_key(&1)))
+        |> Enum.map(fn r ->
+          %{
+            kind: r.kind,
+            uuid: r.target_uuid,
+            label: r.display_name,
+            sublabel: source_label(source),
+            icon: kind_icon(r.kind)
+          }
+        end)
       end)
-      |> Enum.reject(fn {_source, results} -> results == [] end)
 
     {:noreply,
-     socket
-     |> assign(:participant_query, query)
-     |> assign(:participant_results, results)}
+     push_event(socket, "calendar_participant_results", %{
+       q: query,
+       results: results,
+       has_more: false
+     })}
   end
 
-  def handle_event("add_participant", %{"kind" => kind, "uuid" => uuid, "name" => name}, socket) do
+  def handle_event("location_search", %{"q" => query} = params, socket)
+      when is_binary(query) do
+    query = String.trim(query)
+    down = String.downcase(query)
+    limit = parse_limit(params["limit"])
+
+    matches =
+      Enum.filter(socket.assigns.location_options, fn loc ->
+        down == "" or String.contains?(String.downcase(loc.name), down)
+      end)
+
+    results =
+      matches
+      |> Enum.take(limit)
+      |> Enum.map(fn loc ->
+        %{kind: "location", uuid: loc.uuid, label: loc.name, icon: "hero-map-pin"}
+      end)
+
+    {:noreply,
+     push_event(socket, "calendar_location_results", %{
+       q: query,
+       results: results,
+       has_more: length(matches) > limit
+     })}
+  end
+
+  def handle_event("add_participant", %{"kind" => kind, "uuid" => uuid, "label" => name}, socket)
+      when is_binary(kind) and is_binary(name) do
     # the context re-validates on save; this guard keeps the UI honest
-    if Participants.kind_allowed?(socket.assigns.scope, kind) do
-      # free_text never carries a target; the context canonicalizes the
-      # display_name for every other kind at save time regardless
-      target = if kind == "free_text", do: nil, else: uuid
-      entry = %{kind: kind, target_uuid: target, display_name: name}
-      {:noreply, append_participant(socket, entry)}
-    else
-      {:noreply, socket}
-    end
+    socket =
+      if Participants.kind_allowed?(socket.assigns.scope, kind) do
+        # free_text never carries a target; the context canonicalizes the
+        # display_name for every other kind at save time regardless
+        target = if kind == "free_text", do: nil, else: uuid
+        append_participant(socket, %{kind: kind, target_uuid: target, display_name: name})
+      else
+        socket
+      end
+
+    # confirm in every branch so the hook clears instead of spinning
+    {:noreply, push_event(socket, "calendar_participant_staged", %{})}
   end
 
-  def handle_event("add_free_text_participant", _params, socket) do
-    name = String.trim(socket.assigns.participant_query)
+  def handle_event("add_free_text_participant", %{"name" => name}, socket)
+      when is_binary(name) do
+    name = String.trim(name)
 
-    if name == "" do
-      {:noreply, socket}
-    else
-      entry = %{kind: "free_text", target_uuid: nil, display_name: name}
-      {:noreply, append_participant(socket, entry)}
-    end
+    socket =
+      if name == "" do
+        socket
+      else
+        append_participant(socket, %{kind: "free_text", target_uuid: nil, display_name: name})
+      end
+
+    {:noreply, push_event(socket, "calendar_participant_staged", %{})}
   end
 
   def handle_event("remove_participant", %{"idx" => idx}, socket) do
@@ -490,7 +549,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       if multi? do
         owner_color(event.owner_uuid)
       else
-        {event.color, nil}
+        {event.color, Map.get(@static_text_colors, event.color)}
       end
 
     {start_value, end_value} =
@@ -606,8 +665,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     |> assign(:new_event_owner, if(is_nil(event), do: default_new_owner(socket)))
     |> assign(:show_form_errors?, false)
     |> assign(:pending_participants, pending)
-    |> assign(:participant_query, "")
-    |> assign(:participant_results, [])
     |> assign(:event_form, to_form(inclusive_end(changeset), as: "event"))
     |> assign(:show_event_modal, true)
   end
@@ -643,8 +700,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     |> assign(:new_event_owner, nil)
     |> assign(:show_form_errors?, false)
     |> assign(:pending_participants, [])
-    |> assign(:participant_query, "")
-    |> assign(:participant_results, [])
     |> assign(:event_form, nil)
   end
 
@@ -658,15 +713,80 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     end
   end
 
+  # Toggling "All day" carries the values ACROSS the mode switch instead of
+  # presenting empty fields: the date pair derives from the datetime pair
+  # (and vice versa, with default working hours). Runs before the
+  # display-inclusive -> storage-exclusive end-date shift.
   defp normalize_params(%{"all_day" => all_day} = params)
        when all_day in [true, "true", "on"] do
+    params
+    |> carry_dates_from_times()
+    |> shift_inclusive_end()
+  end
+
+  defp normalize_params(params), do: carry_times_from_dates(params)
+
+  defp carry_dates_from_times(params) do
+    params
+    |> carry(fn -> {"starts_on", date_part(params["starts_at"])} end)
+    |> carry(fn ->
+      {"ends_on", date_part(params["ends_at"]) || date_part(params["starts_at"])}
+    end)
+  end
+
+  defp carry_times_from_dates(params) do
+    params
+    |> carry(fn -> {"starts_at", with_time(params["starts_on"], "09:00")} end)
+    |> carry(fn ->
+      # display ends_on is inclusive; a same-day event ends an hour later
+      {"ends_at", with_time(params["ends_on"] || params["starts_on"], "10:00")}
+    end)
+  end
+
+  # fills `key` only when it is absent/blank in the params
+  defp carry(params, fun) do
+    {key, derived} = fun.()
+
+    if params[key] in [nil, ""] and is_binary(derived) do
+      Map.put(params, key, derived)
+    else
+      params
+    end
+  end
+
+  defp date_part(value) when is_binary(value) do
+    case String.split(value, "T", parts: 2) do
+      [date, _time] -> date
+      _ -> nil
+    end
+  end
+
+  defp date_part(_), do: nil
+
+  defp with_time(date, time) when is_binary(date) and date != "", do: "#{date}T#{time}:00"
+  defp with_time(_, _), do: nil
+
+  # The changeset (and DB) hold the EXCLUSIVE end; the form shows the
+  # inclusive "last day". Rendering the raw changeset value would display
+  # the exclusive date — off by one, and each validate would shift the
+  # round-tripped value another day.
+  defp inclusive_end_display(%Date{} = date), do: Date.add(date, -1)
+
+  defp inclusive_end_display(value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, date} -> Date.to_iso8601(Date.add(date, -1))
+      _ -> value
+    end
+  end
+
+  defp inclusive_end_display(value), do: value
+
+  defp shift_inclusive_end(params) do
     case Date.from_iso8601(params["ends_on"] || "") do
       {:ok, last_day} -> Map.put(params, "ends_on", Date.to_iso8601(Date.add(last_day, 1)))
       _ -> params
     end
   end
-
-  defp normalize_params(params), do: params
 
   # When the typed location exactly matches a stored location's name (the
   # datalist suggestion was picked), link it; any other text clears the link
@@ -692,8 +812,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
     socket
     |> assign(:pending_participants, pending)
-    |> assign(:participant_query, "")
-    |> assign(:participant_results, [])
   end
 
   defp save_participants(socket, event) do
@@ -716,6 +834,19 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
          ), false}
     end
   end
+
+  # The SearchPicker hook grows its `limit` by 8 per "Load more" click;
+  # bound it so a forged payload can't request an absurd page.
+  defp parse_limit(n) when is_integer(n), do: n |> max(8) |> min(60)
+
+  defp parse_limit(n) when is_binary(n) do
+    case Integer.parse(n) do
+      {i, _} -> parse_limit(i)
+      _ -> 8
+    end
+  end
+
+  defp parse_limit(_), do: 8
 
   defp kind_icon("user"), do: "hero-user"
   defp kind_icon("staff_person"), do: "hero-identification"
@@ -808,15 +939,32 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
             />
           </div>
 
-          <button phx-click="new_event" class="btn btn-primary btn-sm">
+          <%!-- The dialog opens the same frame as the click (pk:dialog-show);
+               the server round-trip fills the form in behind a skeleton. --%>
+          <button
+            phx-click={
+              JS.dispatch("pk:dialog-show", to: "#calendar-event-modal") |> JS.push("new_event")
+            }
+            class="btn btn-primary btn-sm"
+          >
             <.icon name="hero-plus" class="w-4 h-4" />
             {Gettext.gettext(PhoenixKitWeb.Gettext, "New event")}
           </button>
         </:actions>
       </.admin_page_header>
 
-      <%!-- The month calendar (server-rendered) --%>
-      <div class="card bg-base-100 shadow">
+      <%!-- The month calendar (server-rendered). PkDialogTrigger makes event
+           chips + day cells open the modal INSTANTLY (client dispatch); the
+           matching server event then loads the real content. The "+N more"
+           link has its own phx-click and doesn't match — it opens the lib's
+           popover, not our modal. --%>
+      <div
+        id="calendar-grid-trigger"
+        phx-hook="PkDialogTrigger"
+        data-dialog="calendar-event-modal"
+        data-trigger=".cal-event, .cal-multiday-bar, .cal-day-cell"
+        class="card bg-base-100 shadow"
+      >
         <div class="card-body p-3 sm:p-5">
           <.live_component
             module={PhoenixLiveCalendar.CalendarComponent}
@@ -832,10 +980,20 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
         </div>
       </div>
 
-      <%!-- Event create/edit/details modal --%>
-      <.modal :if={@show_event_modal} show={@show_event_modal} on_close="close_modal" max_width="2xl">
+      <%!-- Event create/edit/details modal. Kept in the DOM so triggers can
+           open it client-side the same frame as the click; until the server
+           round-trip lands (@show_event_modal), the body is a skeleton. --%>
+      <.modal
+        id="calendar-event-modal"
+        keep_in_dom
+        show={@show_event_modal}
+        on_close="close_modal"
+        max_width="2xl"
+      >
         <:title>
           <%= cond do %>
+            <% not @show_event_modal -> %>
+              <span class="inline-block w-28 h-5 bg-base-content/10 rounded animate-pulse"></span>
             <% is_nil(@editing_event) -> %>
               {Gettext.gettext(PhoenixKitWeb.Gettext, "New event")}
             <% @can_edit_event? -> %>
@@ -845,16 +1003,32 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
           <% end %>
         </:title>
 
-        <%!-- Whose calendar an EXISTING event belongs to (immutable) --%>
+        <%= if @show_event_modal do %>
+
+        <%!-- Whose calendar an EXISTING event belongs to (immutable). Shown
+             as a labeled read-only field, and only when it carries real
+             information — someone else's event, or a viewer who manages
+             several calendars. Your own event on your own calendar says
+             nothing. --%>
         <div
-          :if={@editing_event}
-          class="flex items-center gap-2 mb-3 text-sm text-base-content/70"
+          :if={
+            @editing_event &&
+              (@editing_event.owner_uuid != @own_uuid or @can_edit_others?)
+          }
+          class="mb-3"
         >
-          <span class={[
-            "w-2.5 h-2.5 rounded-full",
-            elem(owner_color(@editing_event.owner_uuid), 0)
-          ]} />
-          {owner_label(@people, @own_uuid, @editing_event.owner_uuid)}
+          <span class="label">
+            <span class="label-text font-semibold">
+              {Gettext.gettext(PhoenixKitWeb.Gettext, "Calendar")}
+            </span>
+          </span>
+          <div class="flex items-center gap-2 px-3 py-2 rounded-lg border border-base-content/10 bg-base-200/50 text-sm">
+            <span class={[
+              "w-2.5 h-2.5 rounded-full",
+              elem(owner_color(@editing_event.owner_uuid), 0)
+            ]} />
+            {owner_label(@people, @own_uuid, @editing_event.owner_uuid)}
+          </div>
         </div>
 
         <%= if @can_edit_event? do %>
@@ -869,19 +1043,15 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
                  by design (owner is never cast); the context authorizes the
                  explicit argument on create. --%>
             <div :if={is_nil(@editing_event)} class="space-y-2">
-              <%= if @can_edit_others? do %>
-                <.select
-                  name="owner"
-                  value={@new_event_owner}
-                  label={Gettext.gettext(PhoenixKitWeb.Gettext, "Calendar")}
-                  options={owner_options(@people, @own_uuid)}
-                />
-              <% else %>
-                <p class="text-sm text-base-content/70">
-                  <span class={["w-2.5 h-2.5 rounded-full inline-block mr-1", elem(owner_color(@own_uuid), 0)]} />
-                  {Gettext.gettext(PhoenixKitWeb.Gettext, "On your calendar")}
-                </p>
-              <% end %>
+              <%!-- Without edit_others there is nothing to choose — the event
+                   goes on your calendar and the row would be noise. --%>
+              <.select
+                :if={@can_edit_others?}
+                name="owner"
+                value={@new_event_owner}
+                label={Gettext.gettext(PhoenixKitWeb.Gettext, "Calendar")}
+                options={owner_options(@people, @own_uuid)}
+              />
 
               <div
                 :if={@new_event_owner && not MapSet.member?(@selected, @new_event_owner)}
@@ -913,9 +1083,12 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
                   type="date"
                   label={Gettext.gettext(PhoenixKitWeb.Gettext, "Start date")}
                 />
+                <%!-- storage is exclusive; the field displays the inclusive
+                     last day (the explicit value overrides the field's) --%>
                 <.input
                   field={@event_form[:ends_on]}
                   type="date"
+                  value={inclusive_end_display(@event_form[:ends_on].value)}
                   label={Gettext.gettext(PhoenixKitWeb.Gettext, "End date (last day)")}
                 />
               </div>
@@ -934,26 +1107,94 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
               </div>
             <% end %>
 
-            <.input
-              field={@event_form[:location]}
-              label={Gettext.gettext(PhoenixKitWeb.Gettext, "Location")}
-              list={@location_options != [] && "calendar-location-options"}
-            />
-            <datalist :if={@location_options != []} id="calendar-location-options">
-              <option :for={loc <- @location_options} value={loc.name}></option>
-            </datalist>
+            <%= if @location_options != [] do %>
+              <%!-- Stored-locations picker (core SearchPicker, single-select):
+                   opens the list on click, filters as you type; a pick just
+                   sets the text — link_location maps exact name → uuid. --%>
+              <div>
+                <.label for="calendar-location-picker">
+                  {Gettext.gettext(PhoenixKitWeb.Gettext, "Location")}
+                </.label>
+                <.search_picker
+                  id="calendar-location-picker"
+                  dropdown_id="calendar-location-dropdown"
+                  mode="single"
+                  name={@event_form[:location].name}
+                  value={@event_form[:location].value}
+                  search_event="location_search"
+                  results_event="calendar_location_results"
+                  searching_label={Gettext.gettext(PhoenixKitWeb.Gettext, "Searching…")}
+                  more_label={Gettext.gettext(PhoenixKitWeb.Gettext, "Load more")}
+                  loading_more_label={Gettext.gettext(PhoenixKitWeb.Gettext, "Loading…")}
+                  data-search-on-focus
+                  phx-debounce="300"
+                />
+              </div>
+            <% else %>
+              <.input
+                field={@event_form[:location]}
+                label={Gettext.gettext(PhoenixKitWeb.Gettext, "Location")}
+              />
+            <% end %>
             <.textarea
               field={@event_form[:description]}
               label={Gettext.gettext(PhoenixKitWeb.Gettext, "Description")}
             />
 
+            <%!-- Color: radio swatches (sr-only inputs, ring on the checked
+                 dot) + a live chip previewing how the event reads on the
+                 grid. "Default" is the distinct slashed swatch. --%>
+            <fieldset>
+              <legend class="label">
+                <span class="label-text font-semibold">
+                  {Gettext.gettext(PhoenixKitWeb.Gettext, "Color")}
+                </span>
+              </legend>
+              <div class="flex flex-wrap items-center gap-2">
+                <label class="cursor-pointer" title={Gettext.gettext(PhoenixKitWeb.Gettext, "Default")}>
+                  <input
+                    type="radio"
+                    name={@event_form[:color].name}
+                    value=""
+                    checked={color_value(@event_form) == ""}
+                    class="sr-only peer"
+                  />
+                  <span class="relative block w-7 h-7 rounded-full border-2 border-base-content/20 bg-base-100 overflow-hidden peer-checked:ring-2 peer-checked:ring-primary peer-checked:ring-offset-2 peer-checked:ring-offset-base-100 peer-focus-visible:ring-2 peer-focus-visible:ring-primary">
+                    <span class="absolute left-1/2 top-1/2 w-8 h-0.5 bg-base-content/30 -translate-x-1/2 -translate-y-1/2 rotate-45">
+                    </span>
+                  </span>
+                  <span class="sr-only">{Gettext.gettext(PhoenixKitWeb.Gettext, "Default")}</span>
+                </label>
+                <label :for={choice <- color_choices()} class="cursor-pointer" title={choice.label}>
+                  <input
+                    type="radio"
+                    name={@event_form[:color].name}
+                    value={choice.value}
+                    checked={color_value(@event_form) == choice.value}
+                    class="sr-only peer"
+                  />
+                  <span class={[
+                    "block w-7 h-7 rounded-full border border-base-content/10 peer-checked:ring-2 peer-checked:ring-primary peer-checked:ring-offset-2 peer-checked:ring-offset-base-100 peer-focus-visible:ring-2 peer-focus-visible:ring-primary",
+                    choice.value
+                  ]}>
+                  </span>
+                  <span class="sr-only">{choice.label}</span>
+                </label>
+              </div>
+              <% {preview_bg, preview_text} = preview_colors(color_value(@event_form)) %>
+              <div class="mt-2 flex items-center gap-2 text-xs text-base-content/60">
+                {Gettext.gettext(PhoenixKitWeb.Gettext, "Preview:")}
+                <span class={[
+                  "inline-block max-w-48 truncate rounded px-1.5 py-0.5 text-xs font-medium",
+                  preview_bg,
+                  preview_text
+                ]}>
+                  {preview_title(@event_form)}
+                </span>
+              </div>
+            </fieldset>
+
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <.select
-                field={@event_form[:color]}
-                label={Gettext.gettext(PhoenixKitWeb.Gettext, "Color")}
-                options={color_options()}
-                prompt={Gettext.gettext(PhoenixKitWeb.Gettext, "Default")}
-              />
               <.select
                 field={@event_form[:status]}
                 label={Gettext.gettext(PhoenixKitWeb.Gettext, "Status")}
@@ -990,62 +1231,29 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
               </span>
             </div>
 
-            <form
+            <%!-- Core SearchPicker (multi): the dropdown is client-rendered
+                 (instant); the server only answers participant_search. Enter
+                 stages the typed text — it can't submit the event form
+                 because the picker lives outside it. --%>
+            <.search_picker
               id="calendar-participant-search"
-              phx-change="search_participants"
-              phx-submit="add_free_text_participant"
-              class="group/psearch"
-            >
-              <label class="input input-sm w-full">
-                <.icon name="hero-user-plus" class="w-4 h-4 opacity-50" />
-                <input
-                  type="text"
-                  name="pq"
-                  value={@participant_query}
-                  phx-debounce="300"
-                  placeholder={Gettext.gettext(PhoenixKitWeb.Gettext, "Add participants…")}
-                  autocomplete="off"
-                />
-                <span class="loading loading-spinner loading-xs invisible [.phx-change-loading_&]:visible" />
-              </label>
-            </form>
-
-            <div
-              :if={@participant_results != [] or String.trim(@participant_query) != ""}
-              class="border border-base-content/10 rounded-lg divide-y divide-base-content/5 max-h-52 overflow-y-auto"
-            >
-              <div :for={{source, results} <- @participant_results}>
-                <p class="px-2 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wide text-base-content/50">
-                  {source_label(source)}
-                </p>
-                <button
-                  :for={result <- results}
-                  type="button"
-                  phx-click="add_participant"
-                  phx-value-kind={result.kind}
-                  phx-value-uuid={result.target_uuid}
-                  phx-value-name={result.display_name}
-                  class="w-full text-left px-2 py-1.5 hover:bg-base-200 text-sm flex items-center gap-2"
-                >
-                  <.icon name={kind_icon(result.kind)} class="w-4 h-4 opacity-60" />
-                  {result.display_name}
-                </button>
-              </div>
-              <button
-                :if={String.trim(@participant_query) != ""}
-                type="button"
-                phx-click="add_free_text_participant"
-                class="w-full text-left px-2 py-1.5 hover:bg-base-200 text-sm flex items-center gap-2 text-base-content/70"
-              >
-                <.icon name="hero-plus" class="w-4 h-4" />
-                {Gettext.gettext(PhoenixKitWeb.Gettext, "Add \"%{name}\" as text",
-                  name: String.trim(@participant_query)
-                )}
-                <span class="text-xs opacity-60">
-                  ({Gettext.gettext(PhoenixKitWeb.Gettext, "won't see this event")})
-                </span>
-              </button>
-            </div>
+              dropdown_id="calendar-participant-dropdown"
+              class="input input-sm w-full"
+              search_event="participant_search"
+              results_event="calendar_participant_results"
+              pick_event="add_participant"
+              text_event="add_free_text_participant"
+              staged_event="calendar_participant_staged"
+              placeholder={Gettext.gettext(PhoenixKitWeb.Gettext, "Add participants…")}
+              searching_label={Gettext.gettext(PhoenixKitWeb.Gettext, "Searching…")}
+              add_prefix_label={Gettext.gettext(PhoenixKitWeb.Gettext, "Add")}
+              add_suffix_label={
+                Gettext.gettext(PhoenixKitWeb.Gettext, "as text (won't see this event)")
+              }
+              adding_label={Gettext.gettext(PhoenixKitWeb.Gettext, "Adding…")}
+              more_label={Gettext.gettext(PhoenixKitWeb.Gettext, "Load more")}
+              loading_more_label={Gettext.gettext(PhoenixKitWeb.Gettext, "Loading…")}
+            />
           </div>
         <% else %>
           <%!-- Read-only details for view_others-without-edit --%>
@@ -1075,6 +1283,20 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
                   {p.display_name}
                 </span>
               </div>
+            </div>
+          </div>
+        <% end %>
+        <% else %>
+          <%!-- Skeleton while the opening click's round-trip is in flight --%>
+          <div class="space-y-3 py-2" aria-busy="true">
+            <div class="h-10 bg-base-content/10 rounded animate-pulse"></div>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="h-10 bg-base-content/10 rounded animate-pulse"></div>
+              <div class="h-10 bg-base-content/10 rounded animate-pulse"></div>
+            </div>
+            <div class="h-20 bg-base-content/10 rounded animate-pulse"></div>
+            <div class="flex justify-center pt-2">
+              <span class="loading loading-spinner loading-md text-base-content/40"></span>
             </div>
           </div>
         <% end %>
@@ -1258,17 +1480,90 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     "#{Calendar.strftime(event.starts_at, "%Y-%m-%d %H:%M")} – #{Calendar.strftime(event.ends_at, "%H:%M")}"
   end
 
-  defp color_options do
+  # Swatch choices for the color picker: value "" is the Default (no stored
+  # color — the grid renders its bg-primary fallback). `text` pairs each
+  # background for the live preview chip, mirroring what the grid shows.
+  defp color_choices do
     [
-      {Gettext.gettext(PhoenixKitWeb.Gettext, "Blue"), "bg-primary"},
-      {Gettext.gettext(PhoenixKitWeb.Gettext, "Purple"), "bg-secondary"},
-      {Gettext.gettext(PhoenixKitWeb.Gettext, "Teal"), "bg-accent"},
-      {Gettext.gettext(PhoenixKitWeb.Gettext, "Info"), "bg-info"},
-      {Gettext.gettext(PhoenixKitWeb.Gettext, "Green"), "bg-success"},
-      {Gettext.gettext(PhoenixKitWeb.Gettext, "Yellow"), "bg-warning"},
-      {Gettext.gettext(PhoenixKitWeb.Gettext, "Red"), "bg-error"},
-      {Gettext.gettext(PhoenixKitWeb.Gettext, "Gray"), "bg-neutral"}
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Blue"),
+        value: "bg-primary",
+        text: "text-primary-content"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Purple"),
+        value: "bg-secondary",
+        text: "text-secondary-content"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Teal"),
+        value: "bg-accent",
+        text: "text-accent-content"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Sky"),
+        value: "bg-info",
+        text: "text-info-content"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Green"),
+        value: "bg-success",
+        text: "text-success-content"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Yellow"),
+        value: "bg-warning",
+        text: "text-warning-content"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Red"),
+        value: "bg-error",
+        text: "text-error-content"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Gray"),
+        value: "bg-neutral",
+        text: "text-neutral-content"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Orange"),
+        value: "bg-orange-600",
+        text: "text-white"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Pink"),
+        value: "bg-pink-500",
+        text: "text-white"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Violet"),
+        value: "bg-violet-600",
+        text: "text-white"
+      },
+      %{
+        label: Gettext.gettext(PhoenixKitWeb.Gettext, "Lime"),
+        value: "bg-lime-600",
+        text: "text-black"
+      }
     ]
+  end
+
+  # What the preview chip (and the grid) shows for the current selection;
+  # "" / nil = the grid's default rendering for a color-less event.
+  defp preview_colors(value) do
+    case Enum.find(color_choices(), &(&1.value == value)) do
+      nil -> {"bg-primary", "text-primary-content"}
+      choice -> {choice.value, choice.text}
+    end
+  end
+
+  defp color_value(form), do: to_string(form[:color].value || "")
+
+  defp preview_title(form) do
+    case String.trim(to_string(form[:title].value || "")) do
+      "" -> Gettext.gettext(PhoenixKitWeb.Gettext, "Untitled event")
+      title -> title
+    end
   end
 
   defp status_options do

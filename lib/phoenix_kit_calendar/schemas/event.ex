@@ -30,10 +30,14 @@ defmodule PhoenixKitCalendar.Schemas.Event do
 
   @statuses ~w(confirmed cancelled)
 
-  # daisyUI background classes phoenix_live_calendar can infer a readable
-  # text color for (Safe.infer_text_color/1). Stored verbatim; nil renders
-  # the lib default. A whitelist — never accept arbitrary CSS classes.
-  @colors ~w(bg-primary bg-secondary bg-accent bg-info bg-success bg-warning bg-error bg-neutral)
+  # daisyUI backgrounds phoenix_live_calendar can infer a readable text
+  # color for (Safe.infer_text_color/1), plus four static Tailwind hues
+  # filling the gaps in the semantic set — the LiveView pairs those with
+  # an explicit text color (the lib can't infer one). Stored verbatim;
+  # nil renders the lib default. A whitelist — never accept arbitrary CSS
+  # classes.
+  @colors ~w(bg-primary bg-secondary bg-accent bg-info bg-success bg-warning bg-error bg-neutral
+             bg-orange-600 bg-pink-500 bg-violet-600 bg-lime-600)
 
   @type t :: %__MODULE__{}
 

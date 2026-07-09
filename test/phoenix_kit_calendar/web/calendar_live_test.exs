@@ -3,6 +3,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
 
   alias PhoenixKit.Users.Auth
   alias PhoenixKitCalendar.Events
+  alias PhoenixKitCalendar.Test.Repo, as: TestRepo
 
   @path "/en/admin/calendar"
 
@@ -103,6 +104,64 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
 
       assert event.title == "Formed event"
       assert event.owner_uuid == me.uuid
+    end
+
+    test "toggling All day carries the dates across instead of clearing", %{conn: conn, me: me} do
+      conn = login(conn, me, ["calendar"])
+      {:ok, view, _html} = live(conn, @path)
+
+      view |> element("button", "New event") |> render_click()
+      today = Date.to_iso8601(Date.utc_today())
+
+      # switch to all-day: the (empty) date fields inherit the datetime dates
+      html =
+        view
+        |> form("#calendar-event-form", %{
+          "event" => %{
+            "all_day" => "true",
+            "starts_at" => "#{today}T09:00",
+            "ends_at" => "#{today}T10:00"
+          }
+        })
+        |> render_change()
+
+      assert html =~ ~s(name="event[starts_on]")
+      assert html =~ ~s(value="#{today}")
+      # the checkbox must render CHECKED (regression: a core attr default
+      # used to defeat the field derivation → the box visually unchecked
+      # itself one patch after every toggle)
+      assert html =~ ~r/type="checkbox"[^>]*checked/
+      # ...and the end date shows the INCLUSIVE last day (storage is
+      # exclusive; a one-day event today must not display tomorrow)
+      assert [_, shown_end] = Regex.run(~r/name="event\[ends_on\]"[^>]*value="([^"]+)"/, html)
+      assert shown_end == Date.to_iso8601(Date.utc_today())
+
+      # a later unrelated validate must not shift the displayed date again
+      html =
+        view
+        |> form("#calendar-event-form", %{
+          "event" => %{
+            "all_day" => "true",
+            "title" => "Stable",
+            "starts_on" => today,
+            "ends_on" => shown_end
+          }
+        })
+        |> render_change()
+
+      assert [_, still] = Regex.run(~r/name="event\[ends_on\]"[^>]*value="([^"]+)"/, html)
+      assert still == shown_end
+
+      # switch back to timed: datetime fields derive from the dates
+      html =
+        view
+        |> form("#calendar-event-form", %{
+          "event" => %{"all_day" => "false", "starts_on" => today, "ends_on" => today}
+        })
+        |> render_change()
+
+      assert html =~ ~s(name="event[starts_at]")
+      assert html =~ ~s(value="#{today}T09:00)
     end
 
     test "validation errors stay hidden until Save is attempted", %{conn: conn, me: me} do
@@ -376,7 +435,9 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
       view |> element("button", "New event") |> render_click()
       html = render(view)
 
-      assert html =~ "On your calendar"
+      # no owner picker without edit_others — and no read-only filler row
+      # either (the event silently targets your own calendar)
+      refute html =~ ~s(name="owner")
       # own calendar is not part of the current view → warned
       assert html =~ "won&#39;t appear here"
     end
@@ -394,5 +455,125 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
       {:ok, _view, html} = live(conn2, "#{@path}?people=#{other.uuid},#{me.uuid}")
       refute html =~ "Secret standup"
     end
+  end
+
+  defmodule FakeLocations do
+    def module_key, do: "locations"
+    def module_name, do: "Fake Locations"
+    def enabled?, do: true
+
+    def permission_metadata,
+      do: %{key: "locations", label: "Locations", icon: "hero-map-pin", description: ""}
+  end
+
+  # The pickers are core SearchPicker hooks — the dropdown is client-side;
+  # these cover the server half of the contract (search → push_event rows,
+  # pick/text → chip + staged confirmation).
+  describe "modal pickers (SearchPicker events)" do
+    test "participant_search answers with flattened icon-tagged rows, excluding pending",
+         %{conn: conn, me: me, other: other} do
+      conn = login(conn, me, ["calendar", "calendar.invite_platform_users"])
+      {:ok, view, _} = live(conn, @path)
+      view |> element("button", "New event") |> render_click()
+
+      render_hook(view, "participant_search", %{"q" => other.email, "limit" => 8})
+
+      assert_push_event(view, "calendar_participant_results", %{q: q, results: results})
+      assert q == other.email
+      assert [%{kind: "user", uuid: uuid, icon: "hero-user", sublabel: "Users"}] = results
+      assert uuid == other.uuid
+
+      # spoofed label is accepted for the chip (canonicalized at save time)
+      render_hook(view, "add_participant", %{
+        "kind" => "user",
+        "uuid" => other.uuid,
+        "label" => other.email
+      })
+
+      assert_push_event(view, "calendar_participant_staged", %{})
+      assert render(view) =~ other.email
+
+      # already-pending entries drop out of subsequent searches
+      render_hook(view, "participant_search", %{"q" => other.email, "limit" => 8})
+      assert_push_event(view, "calendar_participant_results", %{results: []})
+    end
+
+    test "a disallowed kind is ignored but still confirms staging (hook must clear)",
+         %{conn: conn, me: me, other: other} do
+      conn = login(conn, me, ["calendar"])
+      {:ok, view, _} = live(conn, @path)
+      view |> element("button", "New event") |> render_click()
+
+      render_hook(view, "add_participant", %{
+        "kind" => "user",
+        "uuid" => other.uuid,
+        "label" => "Sneaky"
+      })
+
+      assert_push_event(view, "calendar_participant_staged", %{})
+      refute render(view) =~ "Sneaky"
+    end
+
+    test "free text stages a chip via the picker's text event", %{conn: conn, me: me} do
+      conn = login(conn, me, ["calendar"])
+      {:ok, view, _} = live(conn, @path)
+      view |> element("button", "New event") |> render_click()
+
+      render_hook(view, "add_free_text_participant", %{"name" => "  Granny  "})
+
+      assert_push_event(view, "calendar_participant_staged", %{})
+      assert render(view) =~ "Granny"
+    end
+
+    test "location picker renders + searches stored locations when the module is on",
+         %{conn: conn, me: me} do
+      PhoenixKit.ModuleRegistry.register(FakeLocations)
+      on_exit(fn -> PhoenixKit.ModuleRegistry.unregister(FakeLocations) end)
+      seed_location("Meeting Room 4")
+      seed_location("Rooftop")
+
+      conn = login(conn, me, ["calendar"])
+      {:ok, view, _} = live(conn, @path)
+      view |> element("button", "New event") |> render_click()
+
+      html = render(view)
+      assert html =~ "calendar-location-picker"
+      assert html =~ "data-search-on-focus"
+
+      # empty query = the full list (the hook searches on focus/click)
+      render_hook(view, "location_search", %{"q" => "", "limit" => 8})
+
+      assert_push_event(view, "calendar_location_results", %{q: "", results: results})
+      assert Enum.map(results, & &1.label) == ["Meeting Room 4", "Rooftop"]
+      assert Enum.all?(results, &(&1.icon == "hero-map-pin"))
+
+      render_hook(view, "location_search", %{"q" => "roof", "limit" => 8})
+      assert_push_event(view, "calendar_location_results", %{q: "roof", results: [one]})
+      assert one.label == "Rooftop"
+    end
+
+    test "without the locations module the field is a plain input", %{conn: conn, me: me} do
+      seed_location("Invisible HQ")
+
+      conn = login(conn, me, ["calendar"])
+      {:ok, view, _} = live(conn, @path)
+      view |> element("button", "New event") |> render_click()
+
+      html = render(view)
+      refute html =~ "calendar-location-picker"
+      assert html =~ ~s(name="event[location]")
+    end
+  end
+
+  defp seed_location(name) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    {:ok, uuid_bin} = Ecto.UUID.dump(Ecto.UUID.generate())
+
+    {1, _} =
+      TestRepo.insert_all("phoenix_kit_locations", [
+        %{uuid: uuid_bin, name: name, inserted_at: now, updated_at: now}
+      ])
+
+    :ok
   end
 end
