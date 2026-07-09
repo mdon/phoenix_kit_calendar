@@ -1452,6 +1452,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
             <.search_picker
               id="calendar-participant-search"
               dropdown_id="calendar-participant-dropdown"
+              direction="up"
               class="input input-sm w-full"
               search_event="participant_search"
               results_event="calendar_participant_results"
