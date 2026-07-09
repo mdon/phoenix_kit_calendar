@@ -617,9 +617,11 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="flex flex-col mx-auto max-w-6xl px-4 py-6 gap-4">
-      <%!-- Toolbar: what you're viewing + actions (core admin_page_header) --%>
-      <.admin_page_header>
+    <div class="flex flex-col mx-auto max-w-6xl px-4 py-4 sm:py-5 gap-3">
+      <%!-- Toolbar: what you're viewing + actions. mb-0: the wrapper's flex
+           gap is the single source of header/calendar spacing (the header's
+           default margin would compound with it and strand the title). --%>
+      <.admin_page_header class="mb-0">
         <div class="flex items-center gap-3 min-w-0">
           <h1 class="text-2xl font-bold truncate">
             <.icon name="hero-calendar-days" class="w-7 h-7 inline-block mr-1" />
@@ -637,7 +639,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
             <button
               type="button"
               phx-click={toggle_popover("calendar-people-panel")}
-              class="btn btn-sm gap-2"
+              class="btn btn-sm gap-2 w-full sm:w-auto"
             >
               <.icon name="hero-users" class="w-4 h-4" />
               {Gettext.gettext(PhoenixKitWeb.Gettext, "Calendars")}
