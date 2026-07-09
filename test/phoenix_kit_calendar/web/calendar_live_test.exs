@@ -57,8 +57,8 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
       assert html =~ "My calendar"
       assert html =~ "New event"
       refute html =~ "Read only"
-      # no Calendars panel button without view_others
-      refute html =~ "phx-click=\"toggle_panel\""
+      # no Calendars panel at all without view_others
+      refute html =~ "calendar-people-panel"
     end
 
     test "shows own events on the month grid", %{conn: conn, me: me} do
@@ -114,15 +114,14 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
   end
 
   describe "the calendars panel (view_others)" do
-    test "panel opens with search, shortcuts, and badged people rows",
+    test "panel is present (hidden, client-toggled) with search, shortcuts, and badges",
          %{conn: conn, me: me} do
       conn = login(conn, me, ["calendar", "calendar.view_others"])
-      {:ok, view, html} = live(conn, @path)
+      {:ok, _view, html} = live(conn, @path)
 
-      assert html =~ "phx-click=\"toggle_panel\""
-
-      html = view |> element("button[phx-click=toggle_panel]") |> render_click()
-
+      # always rendered — opening is a client-side JS toggle (instant),
+      # so the content ships with the page
+      assert html =~ "calendar-people-panel"
       assert html =~ "Search people"
       assert html =~ "Everyone"
       # fixture users hold no calendar-granting role → lock badge tooltip
@@ -134,8 +133,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
     test "search narrows the people list", %{conn: conn, me: me, other: other} do
       conn = login(conn, me, ["calendar", "calendar.view_others"])
       {:ok, view, _html} = live(conn, @path)
-
-      view |> element("button[phx-click=toggle_panel]") |> render_click()
 
       html =
         view
@@ -160,8 +157,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
       conn = login(conn, me, ["calendar", "calendar.view_others"])
       {:ok, view, _html} = live(conn, @path)
 
-      view |> element("button[phx-click=toggle_panel]") |> render_click()
-
       html =
         view
         |> element(~s(button[phx-click=solo_person][phx-value-uuid="#{other.uuid}"]))
@@ -176,8 +171,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
          %{conn: conn, me: me, other: other} do
       conn = login(conn, me, ["calendar", "calendar.view_others", "calendar.edit_others"])
       {:ok, view, _html} = live(conn, @path)
-
-      view |> element("button[phx-click=toggle_panel]") |> render_click()
 
       html =
         view
@@ -216,8 +209,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
 
       assert html =~ "Theirs alone"
 
-      view |> element("button[phx-click=toggle_panel]") |> render_click()
-
       html =
         view
         |> element(~s(input[phx-click=toggle_person][phx-value-uuid="#{other.uuid}"]))
@@ -231,8 +222,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
          %{conn: conn, me: me} do
       conn = login(conn, me, ["calendar", "calendar.view_others"])
       {:ok, view, _html} = live(conn, @path)
-
-      view |> element("button[phx-click=toggle_panel]") |> render_click()
 
       html =
         view

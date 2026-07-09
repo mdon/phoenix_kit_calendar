@@ -95,7 +95,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       |> assign(:can_view_others?, can_view_others?)
       |> assign(:people, if(can_view_others?, do: load_people(), else: []))
       |> assign(:window_counts, %{})
-      |> assign(:panel_open, false)
       |> assign(:people_query, "")
       |> assign(:show_event_modal, false)
       |> assign(:editing_event, nil)
@@ -211,16 +210,11 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   # ── People panel events ─────────────────────────────────────────────────────
+  #
+  # Panel open/close is pure client-side (core PopoverPanel JS commands) —
+  # only the interactions INSIDE the panel reach the server.
 
   @impl true
-  def handle_event("toggle_panel", _params, socket) do
-    {:noreply, assign(socket, :panel_open, not socket.assigns.panel_open)}
-  end
-
-  def handle_event("close_panel", _params, socket) do
-    {:noreply, assign(socket, :panel_open, false)}
-  end
-
   def handle_event("search_people", %{"q" => query}, socket) do
     {:noreply, assign(socket, :people_query, query)}
   end
@@ -584,16 +578,20 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
           </span>
         </div>
         <:actions>
-          <%!-- Calendars panel toggle — view_others holders only --%>
+          <%!-- Calendars panel toggle — view_others holders only. Opens
+               INSTANTLY: client-side JS toggle, no server round-trip. --%>
           <div :if={@can_view_others?} class="relative">
-            <button type="button" phx-click="toggle_panel" class="btn btn-sm gap-2">
+            <button
+              type="button"
+              phx-click={toggle_popover("calendar-people-panel")}
+              class="btn btn-sm gap-2"
+            >
               <.icon name="hero-users" class="w-4 h-4" />
               {Gettext.gettext(PhoenixKitWeb.Gettext, "Calendars")}
               <span class="badge badge-sm badge-primary">{MapSet.size(@selected)}</span>
             </button>
 
             <.people_panel
-              :if={@panel_open}
               people={filtered_people(@people, @people_query)}
               people_query={@people_query}
               selected={@selected}
@@ -784,10 +782,15 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       |> assign(:overflow, max(length(assigns.people) - @panel_row_cap, 0))
 
     ~H"""
-    <.popover_panel id="calendar-people-panel" on_close="close_panel">
+    <.popover_panel id="calendar-people-panel">
       <div class="card-body p-3 gap-2">
           <div class="flex items-center gap-2">
-            <form id="calendar-people-search" phx-change="search_people" class="grow" onsubmit="return false;">
+            <form
+              id="calendar-people-search"
+              phx-change="search_people"
+              class="grow"
+              onsubmit="return false;"
+            >
               <label class="input input-sm w-full">
                 <.icon name="hero-magnifying-glass" class="w-4 h-4 opacity-50" />
                 <input
@@ -798,11 +801,14 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
                   placeholder={Gettext.gettext(PhoenixKitWeb.Gettext, "Search people…")}
                   autocomplete="off"
                 />
+                <%!-- spinner while the (debounced) search round-trip is in
+                     flight — LV puts phx-change-loading on the form --%>
+                <span class="loading loading-spinner loading-xs invisible [.phx-change-loading_&]:visible" />
               </label>
             </form>
             <button
               type="button"
-              phx-click="close_panel"
+              phx-click={hide_popover("calendar-people-panel")}
               class="btn btn-ghost btn-xs btn-circle"
               aria-label={Gettext.gettext(PhoenixKitWeb.Gettext, "Close")}
             >
@@ -865,7 +871,10 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     <li class="flex items-center gap-2 py-1.5 px-1">
       <input
         type="checkbox"
-        class="checkbox checkbox-sm checkbox-primary"
+        class={[
+          "checkbox checkbox-sm checkbox-primary",
+          "[&.phx-click-loading]:opacity-40 [&.phx-click-loading]:animate-pulse"
+        ]}
         checked={@selected}
         phx-click="toggle_person"
         phx-value-uuid={@uuid}
