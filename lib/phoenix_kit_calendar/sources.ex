@@ -15,12 +15,15 @@ defmodule PhoenixKitCalendar.Sources do
   sub-permission — the permission composes with enablement, it never
   substitutes for it.
 
-  ## Leak hygiene (quorum-hardened)
+  ## Leak hygiene (quorum-hardened; browse mode added on the boss's call)
 
-  Searches require a minimum of #{2} characters, cap results per source,
-  return only `{kind, target uuid, display name}` — no phones or profile
-  data beyond the label — and exclude soft-deleted rows
-  (`status = 'trashed'`). A user's label falls back to their email when
+  Searches cap results per source, return only `{kind, target uuid,
+  display name}` — no phones or profile data beyond the label — and
+  exclude soft-deleted rows (`status = 'trashed'`). An EMPTY query is
+  "browse mode": the first page (same per-source cap) of each source the
+  scope may search, so clicking the picker offers people before any
+  typing. That exposes nothing a permitted search couldn't already
+  enumerate — the per-source invite permissions remain the gate. A user's label falls back to their email when
   no name is set, matching how users are identified everywhere else in
   the admin (the person panel, the users list); pickers therefore expose
   emails exactly as far as the rest of the admin already does.
@@ -32,11 +35,7 @@ defmodule PhoenixKitCalendar.Sources do
   alias PhoenixKit.Users.Auth.Scope
   alias PhoenixKit.Users.Permissions
 
-  @min_query_len 2
   @per_source_cap 8
-
-  @doc "Minimum characters before a search runs."
-  def min_query_len, do: @min_query_len
 
   @doc """
   Which participant sources this scope may search. Order = display order.
@@ -59,21 +58,18 @@ defmodule PhoenixKitCalendar.Sources do
 
   @doc """
   Searches every source the scope may use. Returns
-  `%{source => [%{kind, target_uuid, display_name}]}` in source order —
-  empty map for queries under the minimum length.
+  `%{source => [%{kind, target_uuid, display_name}]}` in source order.
+  An empty query lists each source's first page (browse mode — the
+  picker opens on click with people already offered).
   """
   @spec search_participants(Scope.t() | nil, String.t()) :: [{atom(), [map()]}]
   def search_participants(scope, query) do
     query = String.trim(query)
 
-    if String.length(query) < @min_query_len do
-      []
-    else
-      scope
-      |> available_participant_sources()
-      |> Enum.map(fn source -> {source, search_source(source, query)} end)
-      |> Enum.reject(fn {_source, results} -> results == [] end)
-    end
+    scope
+    |> available_participant_sources()
+    |> Enum.map(fn source -> {source, search_source(source, query)} end)
+    |> Enum.reject(fn {_source, results} -> results == [] end)
   end
 
   defp search_source(:users, query) do

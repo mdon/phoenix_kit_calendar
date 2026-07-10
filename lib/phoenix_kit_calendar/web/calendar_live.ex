@@ -1449,10 +1449,13 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
                  (instant); the server only answers participant_search. Enter
                  stages the typed text — it can't submit the event form
                  because the picker lives outside it. --%>
+            <%!-- opens on CLICK with a browsable first page (boss's call:
+                 a field that waits silently for keystrokes reads as dead) --%>
             <.search_picker
               id="calendar-participant-search"
               dropdown_id="calendar-participant-dropdown"
               direction="up"
+              data-search-on-focus
               class="input input-sm w-full"
               search_event="participant_search"
               results_event="calendar_participant_results"

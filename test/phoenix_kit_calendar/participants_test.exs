@@ -398,19 +398,26 @@ defmodule PhoenixKitCalendar.ParticipantsTest do
       assert Sources.available_participant_sources(full) == [:users]
     end
 
-    test "user search needs two characters and returns name-only entries", %{
-      alice: alice,
-      bob: bob
-    } do
+    test "user search returns name-only entries", %{alice: alice, bob: bob} do
       scope = editor(alice)
-
-      assert Sources.search_participants(scope, "x") == []
 
       results = Sources.search_participants(scope, bob.email)
       assert [{:users, [entry]}] = results
       assert entry.kind == "user"
       assert entry.target_uuid == bob.uuid
       assert Map.keys(entry) |> Enum.sort() == [:display_name, :kind, :target_uuid]
+    end
+
+    test "an empty query is browse mode: the first page of each permitted source",
+         %{alice: alice, bob: bob} do
+      scope = editor(alice)
+
+      assert [{:users, entries}] = Sources.search_participants(scope, "")
+      assert length(entries) <= 8
+      assert Enum.any?(entries, &(&1.target_uuid == bob.uuid))
+
+      # no invite permissions → browsing offers nothing
+      assert Sources.search_participants(scope_for(alice, ["calendar"]), "") == []
     end
 
     test "locations list is empty while the locations module is unavailable" do
