@@ -664,6 +664,61 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
       do: %{key: "locations", label: "Locations", icon: "hero-map-pin", description: ""}
   end
 
+  describe "restore_event_draft (reconnect recovery)" do
+    test "rebuilds a NEW event modal from a client draft", %{conn: conn, me: me} do
+      conn = login(conn, me, ["calendar"])
+      {:ok, view, _} = live(conn, @path)
+      today = Date.to_iso8601(Date.utc_today())
+
+      # the draft the PkDialogDraft hook would push after a reconnect
+      render_hook(view, "restore_event_draft", %{
+        "key" => "new",
+        "event" => %{
+          "title" => "Recovered draft",
+          "all_day" => "false",
+          "starts_at" => "#{today}T09:00",
+          "ends_at" => "#{today}T10:00",
+          "color" => "bg-pink-500"
+        }
+      })
+
+      html = render(view)
+      # the modal is open with the editable form and the typed data restored
+      assert html =~ "calendar-event-form"
+      assert html =~ ~s(value="Recovered draft")
+      assert html =~ ~r/name="event\[color\]" value="bg-pink-500" checked/
+    end
+
+    test "an EDIT draft re-fetches and re-authorizes — no acting on an un-editable event",
+         %{conn: conn, me: me, other: other} do
+      event = create_timed(other, "Their private event", ~T[09:00:00], ~T[10:00:00])
+
+      # me has only my own calendar — a draft keyed to other's event must not
+      # let me edit it; it falls back to a NEW event (editing_event nil)
+      conn = login(conn, me, ["calendar"])
+      {:ok, view, _} = live(conn, @path)
+
+      render_hook(view, "restore_event_draft", %{
+        "key" => event.uuid,
+        "event" => %{"title" => "Hijack attempt", "all_day" => "false"}
+      })
+
+      html = render(view)
+      # not editing their event (no Delete button, which only shows for an
+      # editable existing event); the draft title is kept as a new event
+      assert html =~ "New event"
+      refute html =~ "Their private event"
+    end
+
+    test "a malformed draft payload is ignored", %{conn: conn, me: me} do
+      conn = login(conn, me, ["calendar"])
+      {:ok, view, _} = live(conn, @path)
+
+      render_hook(view, "restore_event_draft", %{"event" => "not-a-map"})
+      assert render(view) =~ "My calendar"
+    end
+  end
+
   describe "malformed payloads don't crash the socket" do
     test "forged toggle_person / save_event / event-click payloads are ignored",
          %{conn: conn, me: me} do

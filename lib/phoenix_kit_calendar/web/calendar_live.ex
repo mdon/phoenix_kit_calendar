@@ -303,6 +303,52 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     {:noreply, close_modal(socket)}
   end
 
+  # Rebuilds the event modal from a client-held draft after a websocket
+  # reconnect (see the PkDialogDraft hook). The typed field values are trusted
+  # only as far as any form input is — they run through the same
+  # normalize/localize/validate path, and for an EDIT the event is RE-FETCHED
+  # and re-authorized (a stale draft can't act on an event the user may no
+  # longer edit). Saved participants come back via the re-fetch; unsaved chip
+  # additions are not restored (a small, re-addable residual).
+  def handle_event("restore_event_draft", %{"event" => ev} = payload, socket)
+      when is_map(ev) do
+    {event, base} =
+      case payload["key"] do
+        "new" ->
+          {nil, %Event{}}
+
+        uuid when is_binary(uuid) ->
+          case Events.get_event(socket.assigns.scope, uuid) do
+            {:ok, fetched} -> {fetched, fetched}
+            _ -> {nil, %Event{}}
+          end
+
+        _ ->
+          {nil, %Event{}}
+      end
+
+    changeset =
+      base
+      |> Event.changeset(
+        ev
+        |> normalize_params()
+        |> localize_times(socket.assigns.viewer_tz)
+        |> link_location(socket.assigns.location_options)
+      )
+      |> Map.put(:action, nil)
+
+    # open_modal sets show_event_modal → data-show=true; PkDialog reopens the
+    # kept-in-DOM dialog on its next sync. No client dispatch needed.
+    socket =
+      socket
+      |> open_modal(event, changeset)
+      |> assign(:new_event_owner, sanitize_owner(socket, payload["owner"]))
+
+    {:noreply, socket}
+  end
+
+  def handle_event("restore_event_draft", _params, socket), do: {:noreply, socket}
+
   # Both pickers are core SearchPicker hooks: the dropdown is client-rendered
   # (instant); these handlers only run the search and answer via push_event.
   def handle_event("participant_search", %{"q" => query} = params, socket)
@@ -1145,6 +1191,22 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   def render(assigns) do
     ~H"""
     <div class="flex flex-col mx-auto max-w-6xl px-4 py-4 sm:py-5 gap-3">
+      <%!-- Always-present anchor for the draft hook (the modal body is
+           conditionally rendered, so the hook can't live there). It snapshots
+           the open event form and, after a websocket reconnect, hands it back
+           via restore_event_draft so a network blip mid-edit doesn't wipe the
+           user's typed data. --%>
+      <div
+        id="calendar-event-draft"
+        phx-hook="PkDialogDraft"
+        data-draft-form="calendar-event-form"
+        data-draft-restore-event="restore_event_draft"
+        data-draft-scope="#calendar-event-modal"
+        data-draft-active={to_string(@show_event_modal and @can_edit_event?)}
+        data-draft-key={(@editing_event && @editing_event.uuid) || "new"}
+        hidden
+      >
+      </div>
       <%!-- Toolbar: what you're viewing + actions. mb-0: the wrapper's flex
            gap is the single source of header/calendar spacing (the header's
            default margin would compound with it and strand the title). --%>
