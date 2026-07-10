@@ -58,21 +58,69 @@ defmodule PhoenixKitCalendar.Sources do
 
   @doc """
   Searches every source the scope may use. Returns
-  `%{source => [%{kind, target_uuid, display_name}]}` in source order.
-  An empty query lists each source's first page (browse mode — the
-  picker opens on click with people already offered).
+  `{[{source, [%{kind, target_uuid, display_name}]}], has_more?}` in
+  source order. An empty query lists each source's first page (browse
+  mode — the picker opens on click with people already offered); `limit`
+  is the per-source page size and grows with the picker's "Load more".
+
+  ## Deduplication
+
+  The same human often exists as a platform user AND a staff person AND
+  a CRM contact (linked via `user_uuid`). Rows resolving to a user
+  already listed by an earlier source are dropped — source order wins,
+  so the `user` kind (the most direct visibility/notification link)
+  shadows its staff/CRM mirrors, and a staff row shadows a CRM contact
+  linking the same account. Rows with no user link are always kept.
   """
-  @spec search_participants(Scope.t() | nil, String.t()) :: [{atom(), [map()]}]
-  def search_participants(scope, query) do
+  @spec search_participants(Scope.t() | nil, String.t(), pos_integer()) ::
+          {[{atom(), [map()]}], boolean()}
+  def search_participants(scope, query, limit \\ @per_source_cap) do
     query = String.trim(query)
 
-    scope
-    |> available_participant_sources()
-    |> Enum.map(fn source -> {source, search_source(source, query)} end)
-    |> Enum.reject(fn {_source, results} -> results == [] end)
+    per_source =
+      scope
+      |> available_participant_sources()
+      # one extra row per source so "has more" is knowable
+      |> Enum.map(fn source -> {source, search_source(source, query, limit + 1)} end)
+      |> dedupe_linked_users()
+
+    has_more? = Enum.any?(per_source, fn {_source, results} -> length(results) > limit end)
+
+    results =
+      per_source
+      |> Enum.map(fn {source, results} ->
+        {source, results |> Enum.take(limit) |> Enum.map(&Map.delete(&1, :user_uuid))}
+      end)
+      |> Enum.reject(fn {_source, results} -> results == [] end)
+
+    {results, has_more?}
   end
 
-  defp search_source(:users, query) do
+  # Drops rows whose linked platform user was already emitted by an
+  # earlier source (or an earlier row of the same source).
+  defp dedupe_linked_users(per_source) do
+    {deduped, _seen} =
+      Enum.map_reduce(per_source, MapSet.new(), fn {source, results}, seen ->
+        {kept, seen} =
+          Enum.map_reduce(results, seen, fn entry, seen ->
+            case entry[:user_uuid] do
+              nil ->
+                {entry, seen}
+
+              uuid ->
+                if MapSet.member?(seen, uuid),
+                  do: {nil, seen},
+                  else: {entry, MapSet.put(seen, uuid)}
+            end
+          end)
+
+        {{source, Enum.reject(kept, &is_nil/1)}, seen}
+      end)
+
+    deduped
+  end
+
+  defp search_source(:users, query, limit) do
     pattern = like_pattern(query)
 
     from(u in "phoenix_kit_users",
@@ -82,7 +130,7 @@ defmodule PhoenixKitCalendar.Sources do
           ilike(fragment("COALESCE(?, '')", u.first_name), ^pattern) or
           ilike(fragment("COALESCE(?, '')", u.last_name), ^pattern),
       order_by: [asc: u.email],
-      limit: @per_source_cap,
+      limit: ^limit,
       select: %{
         uuid: type(u.uuid, UUIDv7),
         email: u.email,
@@ -92,63 +140,73 @@ defmodule PhoenixKitCalendar.Sources do
     )
     |> repo().all()
     |> Enum.map(fn u ->
-      %{kind: "user", target_uuid: u.uuid, display_name: user_label(u)}
+      %{kind: "user", target_uuid: u.uuid, display_name: user_label(u), user_uuid: u.uuid}
     end)
   rescue
     _ -> []
   end
 
-  defp search_source(:staff, query) do
+  defp search_source(:staff, query, limit) do
     pattern = like_pattern(query)
 
     from(sp in "phoenix_kit_staff_people",
       where: sp.status != "trashed",
       where: ilike(fragment("COALESCE(?, '')", sp.name), ^pattern),
       order_by: [asc: sp.name],
-      limit: @per_source_cap,
-      select: %{uuid: type(sp.uuid, UUIDv7), name: sp.name}
+      limit: ^limit,
+      select: %{uuid: type(sp.uuid, UUIDv7), name: sp.name, user_uuid: type(sp.user_uuid, UUIDv7)}
     )
     |> repo().all()
     |> Enum.map(fn sp ->
-      %{kind: "staff_person", target_uuid: sp.uuid, display_name: sp.name || ""}
+      %{
+        kind: "staff_person",
+        target_uuid: sp.uuid,
+        display_name: sp.name || "",
+        user_uuid: sp.user_uuid
+      }
     end)
     |> Enum.reject(&(&1.display_name == ""))
   rescue
     _ -> []
   end
 
-  defp search_source(:crm_contacts, query) do
+  defp search_source(:crm_contacts, query, limit) do
     pattern = like_pattern(query)
 
     from(c in "phoenix_kit_crm_contacts",
       where: c.status != "trashed",
       where: ilike(fragment("COALESCE(?, '')", c.name), ^pattern),
       order_by: [asc: c.name],
-      limit: @per_source_cap,
-      select: %{uuid: type(c.uuid, UUIDv7), name: c.name}
+      limit: ^limit,
+      select: %{uuid: type(c.uuid, UUIDv7), name: c.name, user_uuid: type(c.user_uuid, UUIDv7)}
     )
     |> repo().all()
     |> Enum.map(fn c ->
-      %{kind: "crm_contact", target_uuid: c.uuid, display_name: c.name || ""}
+      %{
+        kind: "crm_contact",
+        target_uuid: c.uuid,
+        display_name: c.name || "",
+        user_uuid: c.user_uuid
+      }
     end)
     |> Enum.reject(&(&1.display_name == ""))
   rescue
     _ -> []
   end
 
-  defp search_source(:crm_companies, query) do
+  defp search_source(:crm_companies, query, limit) do
     pattern = like_pattern(query)
 
     from(co in "phoenix_kit_crm_companies",
       where: co.status != "trashed",
       where: ilike(co.name, ^pattern),
       order_by: [asc: co.name],
-      limit: @per_source_cap,
+      limit: ^limit,
       select: %{uuid: type(co.uuid, UUIDv7), name: co.name}
     )
     |> repo().all()
     |> Enum.map(fn co ->
-      %{kind: "crm_company", target_uuid: co.uuid, display_name: co.name}
+      %{kind: "crm_company", target_uuid: co.uuid, display_name: co.name, user_uuid: nil}
     end)
   rescue
     _ -> []

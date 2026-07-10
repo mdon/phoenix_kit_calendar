@@ -401,7 +401,7 @@ defmodule PhoenixKitCalendar.ParticipantsTest do
     test "user search returns name-only entries", %{alice: alice, bob: bob} do
       scope = editor(alice)
 
-      results = Sources.search_participants(scope, bob.email)
+      {results, _has_more} = Sources.search_participants(scope, bob.email)
       assert [{:users, [entry]}] = results
       assert entry.kind == "user"
       assert entry.target_uuid == bob.uuid
@@ -412,12 +412,62 @@ defmodule PhoenixKitCalendar.ParticipantsTest do
          %{alice: alice, bob: bob} do
       scope = editor(alice)
 
-      assert [{:users, entries}] = Sources.search_participants(scope, "")
+      assert {[{:users, entries}], _has_more} = Sources.search_participants(scope, "")
       assert length(entries) <= 8
       assert Enum.any?(entries, &(&1.target_uuid == bob.uuid))
 
       # no invite permissions → browsing offers nothing
-      assert Sources.search_participants(scope_for(alice, ["calendar"]), "") == []
+      assert {[], false} = Sources.search_participants(scope_for(alice, ["calendar"]), "")
+    end
+
+    test "browse pages honor the limit and report has_more", %{alice: alice} do
+      for i <- 1..10, do: seed("phoenix_kit_crm_companies", %{name: "Firm #{i}"})
+
+      scope = scope_for(alice, ["calendar", "calendar.invite_crm"])
+      with_sibling_modules(%{})
+
+      {[{:crm_companies, page}], true} = Sources.search_participants(scope, "", 8)
+      assert length(page) == 8
+
+      {[{:crm_companies, all}], false} = Sources.search_participants(scope, "", 16)
+      assert length(all) == 10
+    end
+
+    test "the same person is not listed once per source — the user kind wins",
+         %{alice: alice, bob: bob} do
+      # bob exists three ways: platform user + staff person + CRM contact
+      seed("phoenix_kit_staff_people", %{user_uuid: dump_uuid(bob.uuid), name: "Bob Staff"})
+      seed("phoenix_kit_crm_contacts", %{user_uuid: dump_uuid(bob.uuid), name: "Bob Contact"})
+      # an unlinked person (no user account) must survive the dedup
+      seed("phoenix_kit_crm_contacts", %{name: "Solo Contact"})
+
+      with_sibling_modules(%{})
+
+      scope =
+        scope_for(alice, [
+          "calendar",
+          "calendar.invite_platform_users",
+          "calendar.invite_staff",
+          "calendar.invite_crm"
+        ])
+
+      {results, _} = Sources.search_participants(scope, "")
+      flat = Enum.flat_map(results, fn {_source, entries} -> entries end)
+
+      bob_rows = Enum.filter(flat, &(&1.target_uuid == bob.uuid or &1.display_name =~ "Bob"))
+      assert [%{kind: "user", target_uuid: uuid}] = bob_rows
+      assert uuid == bob.uuid
+
+      assert Enum.any?(flat, &(&1.display_name == "Solo Contact"))
+
+      # without the users source, the staff row represents bob (and shadows
+      # the CRM contact linking the same account)
+      staff_scope = scope_for(alice, ["calendar", "calendar.invite_staff", "calendar.invite_crm"])
+      {results, _} = Sources.search_participants(staff_scope, "")
+      flat = Enum.flat_map(results, fn {_source, entries} -> entries end)
+
+      bob_rows = Enum.filter(flat, &(&1.display_name =~ "Bob"))
+      assert [%{kind: "staff_person", display_name: "Bob Staff"}] = bob_rows
     end
 
     test "locations list is empty while the locations module is unavailable" do

@@ -299,14 +299,16 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
   # Both pickers are core SearchPicker hooks: the dropdown is client-rendered
   # (instant); these handlers only run the search and answer via push_event.
-  def handle_event("participant_search", %{"q" => query}, socket) when is_binary(query) do
+  def handle_event("participant_search", %{"q" => query} = params, socket)
+      when is_binary(query) do
     query = String.trim(query)
     pending_keys = MapSet.new(socket.assigns.pending_participants, &participant_key/1)
 
+    {grouped, has_more?} =
+      Sources.search_participants(socket.assigns.scope, query, parse_limit(params["limit"]))
+
     results =
-      socket.assigns.scope
-      |> Sources.search_participants(query)
-      |> Enum.flat_map(fn {source, results} ->
+      Enum.flat_map(grouped, fn {source, results} ->
         results
         |> Enum.reject(&MapSet.member?(pending_keys, participant_key(&1)))
         |> Enum.map(fn r ->
@@ -324,7 +326,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
      push_event(socket, "calendar_participant_results", %{
        q: query,
        results: results,
-       has_more: false
+       has_more: has_more?
      })}
   end
 
