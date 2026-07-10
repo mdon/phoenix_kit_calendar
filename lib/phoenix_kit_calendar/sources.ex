@@ -92,11 +92,33 @@ defmodule PhoenixKitCalendar.Sources do
       per_source_raw
       |> dedupe_linked_users()
       |> Enum.map(fn {source, results} ->
-        {source, results |> Enum.take(limit) |> Enum.map(&Map.delete(&1, :user_uuid))}
+        {source, results |> Enum.take(limit) |> Enum.map(&finalize_row/1)}
       end)
       |> Enum.reject(fn {_source, results} -> results == [] end)
 
     {results, has_more?}
+  end
+
+  # Strips the internal user_uuid and stamps a stable PERSON identity the
+  # picker uses to de-duplicate across "Load more" pages: the linked account
+  # when there is one (so the same human doesn't reappear if their row flips
+  # source between pages — staff → user once the user row enters the window),
+  # else the row's own kind:target. Opaque to the client (a hash), so no
+  # linked-account uuid is exposed.
+  defp finalize_row(row) do
+    dedup_id =
+      case row[:user_uuid] do
+        uuid when is_binary(uuid) -> "u" <> person_token(uuid)
+        _ -> "#{row.kind}:#{row.target_uuid}"
+      end
+
+    row
+    |> Map.delete(:user_uuid)
+    |> Map.put(:dedup_id, dedup_id)
+  end
+
+  defp person_token(uuid) do
+    :crypto.hash(:sha256, uuid) |> Base.url_encode64(padding: false) |> binary_part(0, 16)
   end
 
   # Drops rows whose linked platform user was already emitted by an

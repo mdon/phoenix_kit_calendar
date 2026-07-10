@@ -418,7 +418,39 @@ defmodule PhoenixKitCalendar.ParticipantsTest do
       assert [{:users, [entry]}] = results
       assert entry.kind == "user"
       assert entry.target_uuid == bob.uuid
-      assert Map.keys(entry) |> Enum.sort() == [:display_name, :kind, :target_uuid]
+      # name-only payload (+ a dedup_id token), never phones/profile data;
+      # the internal user_uuid is stripped
+      assert Map.keys(entry) |> Enum.sort() == [:dedup_id, :display_name, :kind, :target_uuid]
+      refute Map.has_key?(entry, :user_uuid)
+    end
+
+    test "the same person shares a dedup_id across their user + staff rows",
+         %{alice: alice, bob: bob} do
+      # bob as a platform user AND a staff person linked to the same account
+      seed("phoenix_kit_staff_people", %{user_uuid: dump_uuid(bob.uuid), name: "Bob Staff"})
+      with_sibling_modules(%{})
+
+      scope =
+        scope_for(alice, ["calendar", "calendar.invite_platform_users", "calendar.invite_staff"])
+
+      # a page large enough to reach bob's staff row without the user-source
+      # dedup shadowing it: query staff-only for the staff row, users-only for
+      # the user row, and assert the dedup_id matches (client cross-page dedup)
+      {[{:users, [user_row]}], _} =
+        Sources.search_participants(
+          scope_for(alice, ["calendar", "calendar.invite_platform_users"]),
+          bob.email
+        )
+
+      {[{:staff, [staff_row]}], _} =
+        Sources.search_participants(
+          scope_for(alice, ["calendar", "calendar.invite_staff"]),
+          "Bob Staff"
+        )
+
+      assert user_row.dedup_id == staff_row.dedup_id
+      # ...and it's an opaque token, not the raw account uuid
+      refute user_row.dedup_id == bob.uuid
     end
 
     test "an empty query is browse mode: the first page of each permitted source",

@@ -323,7 +323,9 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
             uuid: r.target_uuid,
             label: r.display_name,
             sublabel: source_label(source),
-            icon: kind_icon(r.kind)
+            icon: kind_icon(r.kind),
+            # person identity for the picker's cross-page de-dup
+            dedup_id: r.dedup_id
           }
         end)
       end)
@@ -489,26 +491,6 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   end
 
   def handle_event("save_event", _params, socket), do: {:noreply, socket}
-
-  # Create on a fresh modal / update the editing event. The create target is
-  # the owner picker's value (edit_others holders) or the modal default,
-  # sanitized to known people and re-authorized by the context either way.
-  defp persist_event(socket, event_params, params) do
-    %{scope: scope, editing_event: editing} = socket.assigns
-
-    case editing do
-      %Event{} = event ->
-        Events.update_event(scope, event, event_params)
-
-      nil ->
-        owner_uuid =
-          sanitize_owner(socket, params["owner"]) ||
-            socket.assigns.new_event_owner ||
-            socket.assigns.own_uuid
-
-        Events.create_event(scope, owner_uuid, event_params)
-    end
-  end
 
   def handle_event("delete_event", _params, socket) do
     case socket.assigns.editing_event do
@@ -760,6 +742,26 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   # Only known people are acceptable targets, and only edit_others holders
   # may target anyone but themselves. The context re-authorizes on create —
   # this just keeps UI state (and the FK) clean.
+  # Create on a fresh modal / update the editing event. The create target is
+  # the owner picker's value (edit_others holders) or the modal default,
+  # sanitized to known people and re-authorized by the context either way.
+  defp persist_event(socket, event_params, params) do
+    %{scope: scope, editing_event: editing} = socket.assigns
+
+    case editing do
+      %Event{} = event ->
+        Events.update_event(scope, event, event_params)
+
+      nil ->
+        owner_uuid =
+          sanitize_owner(socket, params["owner"]) ||
+            socket.assigns.new_event_owner ||
+            socket.assigns.own_uuid
+
+        Events.create_event(scope, owner_uuid, event_params)
+    end
+  end
+
   defp sanitize_owner(socket, uuid) when is_binary(uuid) do
     %{own_uuid: own_uuid, can_edit_others?: can_edit_others?, people: people} = socket.assigns
 
