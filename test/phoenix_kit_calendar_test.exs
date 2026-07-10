@@ -45,11 +45,20 @@ defmodule PhoenixKitCalendarTest do
                PhoenixKitCalendar.js_sources()
     end
 
-    test "phoenix_kit_widgets/0 contributes the upcoming-events widget" do
-      assert [widget] = PhoenixKitCalendar.phoenix_kit_widgets()
-      assert widget.key == "calendar.upcoming"
-      assert widget.module_key == "calendar"
-      assert widget.component == PhoenixKitCalendar.Web.UpcomingWidget
+    test "phoenix_kit_widgets/0 contributes the calendar dashboard widgets" do
+      widgets = PhoenixKitCalendar.phoenix_kit_widgets()
+
+      by_key = Map.new(widgets, &{&1.key, &1})
+
+      assert Map.keys(by_key) |> Enum.sort() ==
+               ["calendar.mini_month", "calendar.today", "calendar.upcoming"]
+
+      # Every widget is module-gated on "calendar" and points at a real component.
+      assert Enum.all?(widgets, &(&1.module_key == "calendar"))
+
+      assert by_key["calendar.upcoming"].component == PhoenixKitCalendar.Web.UpcomingWidget
+      assert by_key["calendar.today"].component == PhoenixKitCalendar.Web.TodayAgendaWidget
+      assert by_key["calendar.mini_month"].component == PhoenixKitCalendar.Web.MiniMonthWidget
     end
 
     test "enabled?/0 is false without a database (defensive default)" do

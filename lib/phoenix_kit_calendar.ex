@@ -122,12 +122,12 @@ defmodule PhoenixKitCalendar do
       sub_permissions: [
         %{
           key: "view_others",
-          label: "View others' calendars",
+          label: "View other users' calendars",
           description: "Read-only access to other users' calendars"
         },
         %{
           key: "edit_others",
-          label: "Edit others' calendars",
+          label: "Edit other users' calendars",
           description: "Create, edit, and delete events on other users' calendars"
         },
         %{
@@ -214,6 +214,36 @@ defmodule PhoenixKitCalendar do
           %{key: "limit", type: :number, label: "Events to show", default: "5"},
           %{key: "show_location", type: :boolean, label: "Show location", default: true}
         ]
+      },
+      %{
+        key: "calendar.today",
+        name: "Today's agenda",
+        description: "Your schedule for today — all-day events first, then by time.",
+        icon: "hero-list-bullet",
+        module_key: module_key(),
+        component: PhoenixKitCalendar.Web.TodayAgendaWidget,
+        category: "Calendar",
+        default_size: %{w: 3, h: 2},
+        min_size: %{w: 2, h: 1},
+        max_size: %{w: 6, h: 4},
+        refresh_interval: 60_000,
+        settings_schema: [
+          %{key: "show_location", type: :boolean, label: "Show location", default: true}
+        ]
+      },
+      %{
+        key: "calendar.mini_month",
+        name: "Mini month",
+        description: "A compact month grid with a dot on the days you have events.",
+        icon: "hero-calendar",
+        module_key: module_key(),
+        component: PhoenixKitCalendar.Web.MiniMonthWidget,
+        category: "Calendar",
+        default_size: %{w: 3, h: 3},
+        min_size: %{w: 2, h: 2},
+        max_size: %{w: 5, h: 5},
+        refresh_interval: 300_000,
+        settings_schema: []
       }
     ]
   end

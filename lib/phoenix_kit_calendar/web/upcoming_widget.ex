@@ -14,9 +14,8 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
   """
   use Phoenix.LiveComponent
 
-  alias PhoenixKit.Users.Auth.Scope
-  alias PhoenixKitCalendar.Events
   alias PhoenixKitCalendar.Schemas.Event
+  alias PhoenixKitCalendar.Web.WidgetSupport
   alias PhoenixKitWeb.Components.Core.EmptyState
 
   @impl true
@@ -29,45 +28,24 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
      socket
      |> assign(:id, assigns.id)
      |> assign(:show_location, Map.get(settings, "show_location", true) in [true, "true"])
-     |> assign(:compact, compact?(assigns[:size]))
-     |> assign(:viewer_tz, viewer_tz(scope))
+     |> assign(:compact, WidgetSupport.compact?(assigns[:size]))
+     |> assign(:viewer_tz, WidgetSupport.viewer_tz(scope))
      |> assign(:events, upcoming_events(scope, limit))}
   end
 
-  # Own-calendar query through the authorized context path; any failure
-  # (no scope, module disabled, missing table) collapses to an empty list.
+  # Own-calendar query through the shared, defensive fetch (viewer-scoped, fails
+  # soft to []). Drop events already finished, soonest first, cap at the limit.
   defp upcoming_events(scope, limit) do
-    tz = viewer_tz(scope)
-    # the viewer's LOCAL today, not UTC — otherwise all-day events flip a day
-    # early/late around UTC midnight for offset viewers
-    today = DateTime.utc_now() |> PhoenixKit.Utils.Date.shift_to_offset(tz) |> DateTime.to_date()
+    today = WidgetSupport.local_today(scope)
+    now = DateTime.utc_now()
 
-    with uuid when is_binary(uuid) <- scope && Scope.user_uuid(scope),
-         {:ok, events} <-
-           Events.list_events(scope, uuid, today, Date.add(today, 60), viewer_tz: tz) do
-      now = DateTime.utc_now()
-
-      events
-      |> Enum.reject(&(&1.status == "cancelled" or past?(&1, now, today)))
-      |> Enum.sort_by(&sort_key/1)
-      |> Enum.take(limit)
-    else
-      _ -> []
-    end
+    scope
+    |> WidgetSupport.fetch_events(today, Date.add(today, 60))
+    |> Enum.reject(&past?(&1, now, today))
+    |> Enum.sort_by(&WidgetSupport.sort_key/1)
+    |> Enum.take(limit)
   rescue
     _ -> []
-  end
-
-  # Offset-hours string: viewer's setting → site "time_zone" → "0". The
-  # widget shows wall-clock times in the viewer's frame (storage is UTC).
-  defp viewer_tz(scope) do
-    case scope && scope.user do
-      %{user_timezone: tz} when is_binary(tz) and tz != "" -> tz
-      %{} = user -> PhoenixKit.Utils.Date.get_user_timezone(user)
-      _ -> "0"
-    end
-  rescue
-    _ -> "0"
   end
 
   defp past?(%Event{all_day: true} = event, _now, today),
@@ -76,20 +54,18 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
   defp past?(%Event{} = event, now, _today),
     do: DateTime.compare(event.ends_at, now) != :gt
 
-  defp sort_key(%Event{all_day: true} = event),
-    do: DateTime.new!(event.starts_on, ~T[00:00:00], "Etc/UTC")
+  # Total over any setting value — a corrupt/unexpected setting (e.g. a map)
+  # must fall back to the default, never raise into the host dashboard.
+  defp parse_limit(value) when is_integer(value) and value > 0, do: min(value, 20)
 
-  defp sort_key(%Event{} = event), do: event.starts_at
-
-  defp parse_limit(value) do
-    case Integer.parse(to_string(value)) do
+  defp parse_limit(value) when is_binary(value) do
+    case Integer.parse(value) do
       {n, _} when n > 0 -> min(n, 20)
       _ -> 5
     end
   end
 
-  defp compact?(%{h: h}) when is_integer(h), do: h < 2
-  defp compact?(_), do: false
+  defp parse_limit(_), do: 5
 
   @impl true
   def render(assigns) do
