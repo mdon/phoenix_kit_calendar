@@ -917,18 +917,19 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     starts_date = date_part(params["starts_at"])
 
     case {date_part(params["ends_at"]), time_part(params["ends_at"])} do
-      {nil, _} ->
-        starts_date
+      {nil, _} -> starts_date
+      {date, "00:00"} -> step_back_clamped(date, starts_date)
+      {date, _} -> date
+    end
+  end
 
-      {date, "00:00"} ->
-        with {:ok, d} <- Date.from_iso8601(date) do
-          candidate = Date.to_iso8601(Date.add(d, -1))
-          if is_binary(starts_date) and candidate < starts_date, do: date, else: candidate
-        else
-          _ -> date
-        end
+  defp step_back_clamped(date, starts_date) do
+    case Date.from_iso8601(date) do
+      {:ok, d} ->
+        candidate = Date.to_iso8601(Date.add(d, -1))
+        if is_binary(starts_date) and candidate < starts_date, do: date, else: candidate
 
-      {date, _} ->
+      _ ->
         date
     end
   end
