@@ -88,7 +88,7 @@ defmodule PhoenixKitCalendar.MixProject do
       pk_dep(:phoenix_kit, "~> 1.7.179"),
 
       # The server-rendered calendar component (month view etc.).
-      pk_dep(:phoenix_live_calendar, "~> 0.1"),
+      pk_dep(:phoenix_live_calendar, "~> 0.2"),
 
       # LiveView is needed for the admin page.
       {:phoenix_live_view, "~> 1.1"},
