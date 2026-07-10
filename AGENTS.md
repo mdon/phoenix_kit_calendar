@@ -24,7 +24,7 @@
 - Timed events: `starts_at`/`ends_at` (`utc_datetime`).
 - All-day events: `starts_on`/`ends_on` (DATE pair — real date semantics, no UTC-midnight/DST ambiguity).
 - DB CHECK `calendar_event_time_shape` enforces exactly one pair per row matching `all_day`, end > start on both; the changeset nils the inactive pair when `all_day` flips so form toggling can't trip it.
-- `status`: `confirmed`/`cancelled` (CHECK-enforced). `color`: whitelisted daisyUI `bg-*` classes only (never arbitrary CSS).
+- `status`: `active`/`cancelled` (CHECK-enforced). `color`: whitelisted daisyUI `bg-*` classes only (never arbitrary CSS).
 - **Timezones (2026-07-09):** timed events are stored in true UTC and displayed/entered in the VIEWER's timezone — core's offset-hours model via `user_timezone` → site `"time_zone"` setting → "0" (`PhoenixKit.Utils.Date.get_user_timezone/1`, `parse_datetime_local/2`, `format_datetime_local/2`, `shift_to_offset/2`; offsets are DST-naive, no IANA db in core). The LV keeps an "input frame" (`@input_tz`): the changeset always holds UTC; `localize_times/2` converts typed wall-clock → UTC using the frame the values were DISPLAYED in (convert with the old frame BEFORE recomputing it, or the checkbox toggle would shift the instant); `datetime_local_value/2` converts back at render (handles both cast DateTimes and raw ISO params — FormField.value prefers params). Cross-timezone: when the target owner's offset differs from the viewer's, the modal shows an indicator + "Use their timezone" checkbox (`owner_tz_entry`, outside the changeset) that switches the display/entry frame — same instant, different digits. Grid (`to_lib_event/3`), read-only view (`event_when/2`) and the widget all shift by the viewer's offset.
 - **v1 simplifications (deliberate):** no recurrence; no separate calendars table.
 
@@ -53,19 +53,25 @@
 - **Picker UI** — core `<.search_picker>` (multi mode, `direction="up"`, search-on-focus; extracted from CRM's involved-parties picker): the dropdown is client-rendered/instant and OPENS ON CLICK with a browsable first page (empty query = browse mode — boss's UX rule: a picker must offer options before any typing; per-source invite permissions + 8/source pages remain the leak control, min-length rule removed). Pages grow via the picker's Load more (`limit` param → `Sources.search_participants/3` fetches limit+1 per source → real `has_more`). **Cross-source dedup**: rows are collapsed by linked `user_uuid` — the `user` kind shadows staff/CRM mirrors of the same account, a staff row shadows a contact, unlinked rows always stay. The LV only answers `participant_search` with flattened icon+sublabel name-only rows. Chips with kind icons; free-text rows/chips are explicitly marked "won't see this event" (people otherwise believe typing a name invites them).
 - The participants test suite seeds the physical staff/CRM/locations tables schemaless with NO module code loaded — that is the standalone proof, keep it that way.
 
-## Dashboard widget
+## Dashboard widgets
 
-`calendar.upcoming` (`Web.UpcomingWidget`) via the duck-typed `phoenix_kit_widgets/0` contract — the viewer's next events, queried through the authorized context path with the widget's `scope` assign (a shared dashboard never leaks anyone else's events). Renders defensively; never crashes the host.
+Three widgets via the duck-typed `phoenix_kit_widgets/0` contract, all queried through the authorized context path with the widget's `scope` assign — a shared dashboard never leaks anyone else's events (pinned by `test/phoenix_kit_calendar/web/widget_test.exs`). All render defensively (nil scope/settings/size → empty state, never a crash) via the shared `Web.WidgetSupport` helper:
+
+- `calendar.upcoming` (`Web.UpcomingWidget`) — the viewer's next events (60-day horizon), soonest-first, with `limit` + `show_location` settings.
+- `calendar.today` (`Web.TodayAgendaWidget`) — the viewer's schedule for today, all-day first then by time.
+- `calendar.mini_month` (`Web.MiniMonthWidget`) — a compact month grid (phoenix_live_calendar's `MiniCalendar`) with a dot on each day that has events.
 
 ## Wiring
 
 - `css_sources: [:phoenix_kit_calendar, :phoenix_live_calendar]`; duck-typed `js_sources/0` declares the calendar lib's hook bundle (progressive enhancement only — month view is fully server-rendered).
 - Activity logging on every mutation (`calendar_event.created/updated/deleted`, guarded + rescued).
+- **Live updates:** each committed mutation broadcasts `{:calendar_event_changed, owner_uuid}` on `Events.pubsub_topic/0` (minimal payload — owner uuid only, no record/PII). `CalendarLive` subscribes on mount (before the first read) and reloads only when the changed owner is in the current view; other sessions/tabs update without a manual refresh.
+- **Gettext:** call sites use the `gettext/1` macro (extractable) on core's `PhoenixKitWeb.Gettext` backend — the widgets/context `use Gettext, backend: PhoenixKitWeb.Gettext`; no module-owned `.po` files.
 - Deps via `pk_dep/3`: `PHOENIX_KIT_PATH=../phoenix_kit PHOENIX_LIVE_CALENDAR_PATH=../phoenix_live_calendar mix test` for local-dep runs.
 
 ## Cross-repo gate
 
-The module needs core **> 1.7.179** (sub-permissions + `Scope.can?/2` + V140/V141). Until Max cuts that release and the pin floats onto it, the standalone suite is **red against the published pin** — always run with `PHOENIX_KIT_PATH=../phoenix_kit`. This is the documented workspace pattern, not CI (no GitHub Actions here).
+The module needs core **> 1.7.179** (sub-permissions + `Scope.can?/2`). Migrations: the calendar tables are core **V141**; the sub-permission key-width widening is core **V142** (it moved from V140 when it was rebased above upstream's V140 warehouse migration). Until Max cuts that release and the pin floats onto it, the standalone suite is **red against the published pin** — always run with `PHOENIX_KIT_PATH=../phoenix_kit`. This is the documented workspace pattern, not CI (no GitHub Actions here).
 
 ## Development
 
@@ -86,6 +92,6 @@ Start with action verbs (`Add`, `Update`, `Fix`, `Remove`). **No AI attribution.
 - Week/day views (the lib supports them; month is the polished one).
 - Recurrence.
 - Real timezone handling for timed events.
-- `live_render` embed contract (the LV body is componentizable; the widget covers dashboards today).
-- Hybrid gettext (strings currently ride core's backend; domain strings should move to a module backend when i18n lands).
+- `live_render` embed contract (the LV body is componentizable; the widgets cover dashboards today).
+- Dedicated module gettext backend for domain strings (call sites already use the `gettext/1` macro; they still ride core's backend until a module backend lands).
 - Drag-to-move/resize via the lib's hooks (`enable_hooks` + `on_event_drop`/`on_event_resize`).
