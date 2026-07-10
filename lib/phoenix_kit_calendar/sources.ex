@@ -101,23 +101,23 @@ defmodule PhoenixKitCalendar.Sources do
   defp dedupe_linked_users(per_source) do
     {deduped, _seen} =
       Enum.map_reduce(per_source, MapSet.new(), fn {source, results}, seen ->
-        {kept, seen} =
-          Enum.map_reduce(results, seen, fn entry, seen ->
-            case entry[:user_uuid] do
-              nil ->
-                {entry, seen}
-
-              uuid ->
-                if MapSet.member?(seen, uuid),
-                  do: {nil, seen},
-                  else: {entry, MapSet.put(seen, uuid)}
-            end
-          end)
-
+        {kept, seen} = Enum.map_reduce(results, seen, &dedupe_entry/2)
         {{source, Enum.reject(kept, &is_nil/1)}, seen}
       end)
 
     deduped
+  end
+
+  defp dedupe_entry(entry, seen) do
+    case entry[:user_uuid] do
+      nil ->
+        {entry, seen}
+
+      uuid ->
+        if MapSet.member?(seen, uuid),
+          do: {nil, seen},
+          else: {entry, MapSet.put(seen, uuid)}
+    end
   end
 
   defp search_source(:users, query, limit) do
