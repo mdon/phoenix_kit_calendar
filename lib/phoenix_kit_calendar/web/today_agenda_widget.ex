@@ -38,7 +38,7 @@ defmodule PhoenixKitCalendar.Web.TodayAgendaWidget do
     scope
     |> WidgetSupport.fetch_events(today, Date.add(today, 1))
     |> Enum.filter(&WidgetSupport.on_date?(&1, today, tz))
-    |> Enum.sort_by(&WidgetSupport.sort_key/1)
+    |> Enum.sort_by(&WidgetSupport.sort_key/1, DateTime)
   end
 
   @impl true

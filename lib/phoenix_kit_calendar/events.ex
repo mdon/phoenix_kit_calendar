@@ -513,6 +513,16 @@ defmodule PhoenixKitCalendar.Events do
   # (both uuids) are logged. A richer, permission-scoped activity feed is the
   # right long-term home for titles — tracked as a follow-up.
   defp tap_log({:ok, %Event{} = event} = result, action, scope, opts) do
+    log_activity(event, action, scope, opts)
+    broadcast_event_changed(event.owner_uuid)
+    result
+  end
+
+  defp tap_log(result, _action, _scope, _opts), do: result
+
+  # Isolated from broadcast_event_changed/1: a logging failure must never
+  # suppress the live-update broadcast for a successful mutation.
+  defp log_activity(event, action, scope, opts) do
     if Code.ensure_loaded?(PhoenixKit.Activity) do
       actor_uuid = Keyword.get(opts, :actor_uuid, scope && Scope.user_uuid(scope))
 
@@ -528,14 +538,9 @@ defmodule PhoenixKitCalendar.Events do
         }
       })
     end
-
-    broadcast_event_changed(event.owner_uuid)
-    result
   rescue
-    _ -> result
+    _ -> :ok
   end
-
-  defp tap_log(result, _action, _scope, _opts), do: result
 
   # Announce a committed change with a minimal payload (owner uuid only — no
   # record, no PII). No-op when the host configures no PubSub server.

@@ -46,7 +46,7 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
     scope
     |> WidgetSupport.fetch_events(today, Date.add(today, @horizon_days))
     |> Enum.reject(&past?(&1, now, today))
-    |> Enum.sort_by(&WidgetSupport.sort_key/1)
+    |> Enum.sort_by(&WidgetSupport.sort_key/1, DateTime)
     |> Enum.take(limit)
   rescue
     _ -> []

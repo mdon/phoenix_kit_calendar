@@ -19,13 +19,11 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
     %{conn: conn, me: me, other: other}
   end
 
-  defp create_user do
-    {:ok, user} =
-      Auth.register_user(%{
-        email: "callv_#{System.unique_integer([:positive])}@example.com",
-        password: "ValidPassword123!"
-      })
+  defp create_user,
+    do: create_user_with_email("callv_#{System.unique_integer([:positive])}@example.com")
 
+  defp create_user_with_email(email) do
+    {:ok, user} = Auth.register_user(%{email: email, password: "ValidPassword123!"})
     user
   end
 
@@ -325,6 +323,26 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
         |> render_change(%{"q" => "match-nothing-xyz"})
 
       assert html =~ "No people match"
+    end
+
+    test "a person created after connecting appears once the panel reloads (not a mount-time copy)",
+         %{conn: conn, me: me, other: other} do
+      conn = login(conn, me, ["calendar", "calendar.view_others"])
+      {:ok, view, html} = live(conn, @path)
+
+      # not on the roster yet — mount happened before this user existed
+      refute html =~ "brand.new.person"
+      new_person = create_user_with_email("brand.new.person@example.com")
+
+      # any interaction that push_patches (handle_params re-runs, per the
+      # calendar's own "fresh scope, not a mount-time copy" convention)
+      html =
+        view
+        |> element(~s(button[phx-click=solo_person][phx-value-uuid="#{other.uuid}"]))
+        |> render_click()
+
+      assert html =~ "brand.new.person"
+      assert new_person.uuid
     end
 
     test "soloing a person shows their calendar read-only without edit_others",

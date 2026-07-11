@@ -132,7 +132,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       |> assign(:window, {from, until})
       |> assign(:can_view_others?, can_view_others?)
       |> assign(:can_edit_others?, can_edit_others?)
-      |> assign(:people, if(can_view_others?, do: load_people(site_tz), else: []))
+      |> assign(:people, [])
       |> assign(:window_counts, %{})
       |> assign(:people_query, "")
       |> assign(:show_event_modal, false)
@@ -154,6 +154,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
   @impl true
   def handle_params(params, _url, socket) do
+    socket = assign(socket, :people, reload_people(socket))
     selected = sanitize_selection(socket, params["people"])
 
     socket =
@@ -164,6 +165,14 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       |> reload_window_counts()
 
     {:noreply, socket}
+  end
+
+  # DB query for the people panel — loaded here, not in mount/3, so it runs
+  # once per connected mount (not duplicated across the static+websocket
+  # mount) and stays fresh across navigations instead of a mount-time copy
+  # a permission/roster change could never update for the life of the socket.
+  defp reload_people(socket) do
+    if socket.assigns.can_view_others?, do: load_people(socket.assigns.site_tz), else: []
   end
 
   # Parses ?people= into a safe, non-empty selection set. Unknown ids are

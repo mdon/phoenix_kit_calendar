@@ -35,8 +35,10 @@ defmodule PhoenixKitCalendar.Web.WidgetTest do
     do: %Scope{user: user, authenticated?: true, cached_permissions: MapSet.new(["calendar"])}
 
   # A timed event `days` from today on `owner`'s calendar.
-  defp event_for(owner, title, days) do
-    date = Date.add(Date.utc_today(), days)
+  defp event_for(owner, title, days), do: event_on(owner, title, Date.add(Date.utc_today(), days))
+
+  # A timed event on an explicit date on `owner`'s calendar.
+  defp event_on(owner, title, %Date{} = date) do
     {:ok, s} = DateTime.new(date, ~T[09:00:00], "Etc/UTC")
     {:ok, e} = DateTime.new(date, ~T[10:00:00], "Etc/UTC")
 
@@ -49,6 +51,15 @@ defmodule PhoenixKitCalendar.Web.WidgetTest do
       })
 
     event
+  end
+
+  # {earlier, later} dates, both within the 60-day widget horizon, straddling
+  # a month boundary so `earlier.day > later.day` (e.g. Jul 31 / Aug 1) — the
+  # exact shape that trips a default (day-before-month) term-order sort.
+  defp month_crossing_pair do
+    today = Date.utc_today()
+    boundary_offset = Enum.find(2..59, fn i -> Date.add(today, i).day == 1 end)
+    {Date.add(today, boundary_offset - 1), Date.add(today, boundary_offset)}
   end
 
   describe "nil degradation (a widget must never crash the host)" do
@@ -147,6 +158,26 @@ defmodule PhoenixKitCalendar.Web.WidgetTest do
         )
 
       assert html =~ "Still shows"
+    end
+  end
+
+  describe "chronological ordering across a month boundary" do
+    test "Upcoming stays soonest-first even when day-of-month decreases", %{alice: alice} do
+      {earlier, later} = month_crossing_pair()
+
+      # Inserted out of order so a passing test can't be an insertion-order fluke.
+      event_on(alice, "Later event", later)
+      event_on(alice, "Earlier event", earlier)
+
+      html =
+        render_component(UpcomingWidget,
+          id: "u",
+          scope: scope_for(alice),
+          settings: %{},
+          size: %{w: 3, h: 3}
+        )
+
+      assert html =~ ~r/Earlier event.*Later event/s
     end
   end
 end
