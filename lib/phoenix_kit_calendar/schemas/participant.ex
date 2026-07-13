@@ -21,6 +21,7 @@ defmodule PhoenixKitCalendar.Schemas.Participant do
   """
 
   use Ecto.Schema
+  use PhoenixKit.SchemaPrefix
   import Ecto.Changeset
 
   @kinds ~w(user staff_person crm_contact crm_company free_text)

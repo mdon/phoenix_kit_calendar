@@ -26,6 +26,7 @@ defmodule PhoenixKitCalendar.Schemas.Event do
   """
 
   use Ecto.Schema
+  use PhoenixKit.SchemaPrefix
   import Ecto.Changeset
 
   @statuses ~w(active cancelled)
