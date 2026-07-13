@@ -86,7 +86,7 @@ defmodule PhoenixKitCalendar.MixProject do
       # the standalone suite is red against the published pin; develop with
       # PHOENIX_KIT_PATH=../phoenix_kit. `disabled`/`wrapper_class`/`title`/
       # `:description` on the shared `<.checkbox>` component ship in 1.7.184.
-      pk_dep(:phoenix_kit, "~> 1.7.184"),
+      pk_dep(:phoenix_kit, "~> 1.7.189"),
 
       # The server-rendered calendar component (month view etc.).
       pk_dep(:phoenix_live_calendar, "~> 0.2"),
