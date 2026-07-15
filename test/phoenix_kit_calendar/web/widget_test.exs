@@ -128,6 +128,51 @@ defmodule PhoenixKitCalendar.Web.WidgetTest do
     end
   end
 
+  describe "views (user-chosen, honored verbatim)" do
+    test "Upcoming compact renders one-line rows without the meta line", %{alice: alice} do
+      event_for(alice, "Standup", 1)
+
+      detailed =
+        render_component(UpcomingWidget,
+          id: "u",
+          scope: scope_for(alice),
+          settings: %{},
+          view: "detailed",
+          size: %{w: 12, h: 8}
+        )
+
+      compact =
+        render_component(UpcomingWidget,
+          id: "u",
+          scope: scope_for(alice),
+          settings: %{},
+          view: "compact",
+          size: %{w: 12, h: 4}
+        )
+
+      # (the @container <style> block always contains the selector TEXT, so
+      # assert on the meta paragraph's class attribute specifically)
+      assert detailed =~ "Standup" and detailed =~ "pk-slot-meta truncate"
+      assert compact =~ "Standup"
+      refute compact =~ "pk-slot-meta truncate"
+    end
+
+    test "an unknown view falls back to detailed", %{alice: alice} do
+      event_for(alice, "Standup", 1)
+
+      html =
+        render_component(UpcomingWidget,
+          id: "u",
+          scope: scope_for(alice),
+          settings: %{},
+          view: "bogus",
+          size: %{w: 12, h: 8}
+        )
+
+      assert html =~ "pk-slot-meta truncate"
+    end
+  end
+
   describe "settings consumption" do
     test "Upcoming honors the limit setting", %{alice: alice} do
       for i <- 1..4, do: event_for(alice, "Event #{i}", i)

@@ -29,6 +29,7 @@ defmodule PhoenixKitCalendar.Web.TodayAgendaWidget do
      |> assign(:id, assigns.id)
      |> assign(:today, today)
      |> assign(:viewer_tz, tz)
+     |> assign(:view, (assigns[:view] in ["detailed", "compact"] && assigns[:view]) || "detailed")
      |> assign(:show_location, Map.get(settings, "show_location", true) in [true, "true"])
      |> assign(:events, todays_events(scope, today, tz))}
   end
@@ -75,7 +76,7 @@ defmodule PhoenixKitCalendar.Web.TodayAgendaWidget do
               class="flex min-h-0 flex-1 items-center gap-2 min-w-0 overflow-hidden [container-type:size]"
             >
               <span class={["h-[10cqh] w-[10cqh] rounded-full shrink-0", event.color || "bg-primary"]} />
-              <div class="min-w-0 flex-1">
+              <div :if={@view == "detailed"} class="min-w-0 flex-1">
                 <p
                   class="truncate font-medium leading-tight"
                   style={WidgetSupport.fit_text(11, "34cqh", 15)}
@@ -90,6 +91,21 @@ defmodule PhoenixKitCalendar.Web.TodayAgendaWidget do
                     · {event.location}</span>
                 </p>
               </div>
+              <%!-- Compact: one line — title left, time right. --%>
+              <p
+                :if={@view == "compact"}
+                class="min-w-0 flex-1 truncate font-medium leading-tight"
+                style={WidgetSupport.fit_text(11, "42cqh", 15)}
+              >
+                {event.title}
+              </p>
+              <span
+                :if={@view == "compact"}
+                class="shrink-0 leading-none tabular-nums text-base-content/60"
+                style={WidgetSupport.fit_text(9, "32cqh", 12)}
+              >
+                {time_label(event, @viewer_tz)}
+              </span>
             </li>
             <li :for={_pad <- 1..max(4 - length(@events), 0)//1} class="min-h-0 flex-1"></li>
           </ul>

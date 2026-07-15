@@ -210,6 +210,10 @@ defmodule PhoenixKitCalendar do
         default_size: %{w: 12, h: 8},
         min_size: %{w: 8, h: 4},
         refresh_interval: 60_000,
+        views: [
+          %{key: "detailed", name: "Detailed", min_size: %{w: 8, h: 6}},
+          %{key: "compact", name: "Compact", min_size: %{w: 8, h: 4}}
+        ],
         settings_schema: [
           %{key: "limit", type: :number, label: "Events to show", default: "5"},
           %{key: "show_location", type: :boolean, label: "Show location", default: true}
@@ -226,6 +230,10 @@ defmodule PhoenixKitCalendar do
         default_size: %{w: 12, h: 8},
         min_size: %{w: 8, h: 4},
         refresh_interval: 60_000,
+        views: [
+          %{key: "detailed", name: "Detailed", min_size: %{w: 8, h: 6}},
+          %{key: "compact", name: "Compact", min_size: %{w: 8, h: 4}}
+        ],
         settings_schema: [
           %{key: "show_location", type: :boolean, label: "Show location", default: true}
         ]
