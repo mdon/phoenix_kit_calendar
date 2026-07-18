@@ -194,6 +194,7 @@ defmodule PhoenixKitCalendar do
   #
   # Duck-typed, one-way contract with phoenix_kit_dashboards: no dependency on
   # the dashboards package; its Registry discovers this function at runtime.
+  # Sizes are in the dashboards LATTICE units (25px nominal square cells).
   @doc false
   def phoenix_kit_widgets do
     [
@@ -206,10 +207,13 @@ defmodule PhoenixKitCalendar do
         module_key: module_key(),
         component: PhoenixKitCalendar.Web.UpcomingWidget,
         category: "Calendar",
-        default_size: %{w: 3, h: 2},
-        min_size: %{w: 2, h: 1},
-        max_size: %{w: 6, h: 4},
+        default_size: %{w: 12, h: 8},
+        min_size: %{w: 8, h: 4},
         refresh_interval: 60_000,
+        views: [
+          %{key: "detailed", name: "Detailed", min_size: %{w: 8, h: 6}},
+          %{key: "compact", name: "Compact", min_size: %{w: 8, h: 4}}
+        ],
         settings_schema: [
           %{key: "limit", type: :number, label: "Events to show", default: "5"},
           %{key: "show_location", type: :boolean, label: "Show location", default: true}
@@ -223,10 +227,13 @@ defmodule PhoenixKitCalendar do
         module_key: module_key(),
         component: PhoenixKitCalendar.Web.TodayAgendaWidget,
         category: "Calendar",
-        default_size: %{w: 3, h: 2},
-        min_size: %{w: 2, h: 1},
-        max_size: %{w: 6, h: 4},
+        default_size: %{w: 12, h: 8},
+        min_size: %{w: 8, h: 4},
         refresh_interval: 60_000,
+        views: [
+          %{key: "detailed", name: "Detailed", min_size: %{w: 8, h: 6}},
+          %{key: "compact", name: "Compact", min_size: %{w: 8, h: 4}}
+        ],
         settings_schema: [
           %{key: "show_location", type: :boolean, label: "Show location", default: true}
         ]
@@ -239,9 +246,8 @@ defmodule PhoenixKitCalendar do
         module_key: module_key(),
         component: PhoenixKitCalendar.Web.MiniMonthWidget,
         category: "Calendar",
-        default_size: %{w: 3, h: 3},
-        min_size: %{w: 2, h: 2},
-        max_size: %{w: 5, h: 5},
+        default_size: %{w: 12, h: 12},
+        min_size: %{w: 8, h: 8},
         refresh_interval: 300_000,
         settings_schema: []
       }

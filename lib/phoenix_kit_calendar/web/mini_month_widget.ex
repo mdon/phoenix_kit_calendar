@@ -53,7 +53,7 @@ defmodule PhoenixKitCalendar.Web.MiniMonthWidget do
   def render(assigns) do
     ~H"""
     <div class="card h-full overflow-hidden bg-base-100 flex flex-col">
-      <div class="card-body p-3 flex items-center justify-center overflow-auto">
+      <div class="card-body p-3 flex items-center justify-center overflow-hidden">
         <MiniCalendar.mini_calendar
           date={@today}
           today={@today}
