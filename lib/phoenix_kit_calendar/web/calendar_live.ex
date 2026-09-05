@@ -991,8 +991,8 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   # answers false for a module that has merely not been loaded, which under a
   # release is the normal state.
   defp identifier?(tz) do
-    Code.ensure_loaded?(TimeZone) and function_exported?(TimeZone, :effectively_same?, 2) and
-      TimeZone.identifier?(tz)
+    Code.ensure_loaded?(TimeZone) and function_exported?(TimeZone, :identifier?, 1) and
+      function_exported?(TimeZone, :effectively_same?, 2) and TimeZone.identifier?(tz)
   end
 
   # What noon means in UTC on the 1st and 15th of every month of this year.

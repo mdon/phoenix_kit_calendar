@@ -316,6 +316,29 @@ defmodule PhoenixKitCalendar.EventsTest do
       end
     end
 
+    test "an unresolvable viewer zone reads the window as UTC", %{alice: alice} do
+      scope = scope_for(alice, ["calendar"])
+
+      {:ok, event} =
+        Events.create_event(scope, alice.uuid, %{
+          "title" => "Late in UTC",
+          "starts_at" => "2026-07-31T23:30:00Z",
+          "ends_at" => "2026-07-31T23:45:00Z"
+        })
+
+      for tz <- ["nonsense", "", nil] do
+        {:ok, july} =
+          Events.list_events(scope, alice.uuid, ~D[2026-07-01], ~D[2026-08-01], viewer_tz: tz)
+
+        assert event.uuid in Enum.map(july, & &1.uuid), inspect(tz)
+
+        {:ok, august} =
+          Events.list_events(scope, alice.uuid, ~D[2026-08-01], ~D[2026-09-01], viewer_tz: tz)
+
+        refute event.uuid in Enum.map(august, & &1.uuid), inspect(tz)
+      end
+    end
+
     test "all-day events overlap the window by dates", %{alice: alice} do
       scope = scope_for(alice, ["calendar"])
 
