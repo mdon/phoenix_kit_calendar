@@ -57,6 +57,7 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   alias PhoenixKit.Users.Permissions
   alias PhoenixKit.Users.Roles
   alias PhoenixKit.Utils.Date, as: DateUtils
+  alias PhoenixKit.Utils.TimeZone
   alias PhoenixKitCalendar.Events
   alias PhoenixKitCalendar.Participants
   alias PhoenixKitCalendar.Paths
@@ -939,7 +940,43 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     _ -> socket.assigns.viewer_tz
   end
 
-  defp tz_differs?(a, b), do: DateUtils.offset_to_seconds(a) != DateUtils.offset_to_seconds(b)
+  # "Would these two show a different wall clock?" — which is what decides
+  # whether the modal offers "show in their timezone" at all.
+  #
+  # It compared `offset_to_seconds/1`, and that could not read an IANA
+  # identifier: it ran `Float.parse/1` and answered 0 for every named zone, so
+  # `Europe/Warsaw` and `America/New_York` compared EQUAL and the affordance
+  # never appeared. Core fixed the parser in 2.14.1, but an offset comparison
+  # is still the wrong question — two zones can share an offset today and
+  # diverge in March, and the answer would flip under the user without either
+  # value changing.
+  #
+  # `TimeZone.effectively_same?/2` asks the real question: same offset AND the
+  # same daylight-saving rule, year round.
+  defp tz_differs?(a, b), do: not same_zone?(normalize_tz(a), normalize_tz(b))
+
+  # `TimeZone.effectively_same?/2` is public from core 2.14.1, and the
+  # `:phoenix_kit` requirement stays a two-segment `~> 2.0` on purpose —
+  # narrowing it to one core minor makes `mix deps.get` unsolvable for any host
+  # running this module beside a different core (see
+  # `test/core_pin_conformance_test.exs`). So it is feature-detected, with the
+  # offset comparison as the fallback it replaces.
+  #
+  # `Code.ensure_loaded?/1` as well as `function_exported?/3`: the latter
+  # answers false for a module that has merely not been loaded, which under a
+  # release is the normal state.
+  defp same_zone?(a, b) do
+    if Code.ensure_loaded?(TimeZone) and function_exported?(TimeZone, :effectively_same?, 2) do
+      TimeZone.effectively_same?(a, b)
+    else
+      DateUtils.offset_to_seconds(a) == DateUtils.offset_to_seconds(b)
+    end
+  end
+
+  # `effectively_same?/2` compares zone identities, so a nil/"" (meaning "use
+  # the site default") has to become something comparable first.
+  defp normalize_tz(tz) when is_binary(tz) and tz != "", do: tz
+  defp normalize_tz(_tz), do: PhoenixKit.Settings.get_setting("time_zone", "0")
 
   # Recomputes the modal's timezone frame from the current target owner +
   # the "show in their timezone" checkbox. Runs at open and on every
