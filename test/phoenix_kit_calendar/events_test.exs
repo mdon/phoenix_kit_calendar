@@ -274,6 +274,48 @@ defmodule PhoenixKitCalendar.EventsTest do
       end
     end
 
+    test "zones that switch AT midnight keep the repeated or skipped hour on the right day",
+         %{alice: alice} do
+      scope = scope_for(alice, ["calendar"])
+
+      # Havana falls back 2026-11-01 01:00 → 00:00, so 00:00–01:00 Nov 1 happens
+      # twice (04:00Z–06:00Z). Both belong to Nov 1: local midnight resolves to
+      # the FIRST 00:00. Santiago falls back 2026-04-05 00:00 → 23:00 Apr 4, so
+      # 23:00–00:00 Apr 4 happens twice (02:00Z–04:00Z) and Apr 5 starts at
+      # 04:00Z; it springs forward 2026-09-06 00:00 → 01:00, so Sep 6 has no
+      # 00:00 and starts at 01:00 (04:00Z).
+      cases = [
+        {"America/Havana", ~D[2026-11-01], ~U[2026-11-01 04:30:00Z], :inside},
+        {"America/Havana", ~D[2026-11-01], ~U[2026-11-01 05:30:00Z], :inside},
+        {"America/Havana", ~D[2026-11-01], ~U[2026-11-01 03:30:00Z], :day_before},
+        {"America/Santiago", ~D[2026-04-05], ~U[2026-04-05 03:30:00Z], :day_before},
+        {"America/Santiago", ~D[2026-04-05], ~U[2026-04-05 04:30:00Z], :inside},
+        {"America/Santiago", ~D[2026-09-06], ~U[2026-09-06 03:30:00Z], :day_before},
+        {"America/Santiago", ~D[2026-09-06], ~U[2026-09-06 04:30:00Z], :inside}
+      ]
+
+      for {tz, day, starts_at, expected} <- cases do
+        {:ok, event} =
+          Events.create_event(scope, alice.uuid, %{
+            "title" => "#{tz} #{DateTime.to_iso8601(starts_at)}",
+            "starts_at" => DateTime.to_iso8601(starts_at),
+            "ends_at" => DateTime.to_iso8601(DateTime.add(starts_at, 15, :minute))
+          })
+
+        {:ok, on_day} =
+          Events.list_events(scope, alice.uuid, day, Date.add(day, 1), viewer_tz: tz)
+
+        {:ok, day_before} =
+          Events.list_events(scope, alice.uuid, Date.add(day, -1), day, viewer_tz: tz)
+
+        assert event.uuid in Enum.map(on_day, & &1.uuid) == (expected == :inside),
+               "#{tz} #{starts_at} on #{day}"
+
+        assert event.uuid in Enum.map(day_before, & &1.uuid) == (expected == :day_before),
+               "#{tz} #{starts_at} on #{Date.add(day, -1)}"
+      end
+    end
+
     test "all-day events overlap the window by dates", %{alice: alice} do
       scope = scope_for(alice, ["calendar"])
 
