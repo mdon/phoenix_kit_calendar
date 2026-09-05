@@ -33,6 +33,26 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
 
   defp scope_of(user, perms), do: fake_scope(user_uuid: user.uuid, permissions: perms)
 
+  # Persists `tz` (an IANA id, a legacy offset, or nil for "site default") on
+  # `owner` and puts one timed event on their calendar.
+  defp event_on(owner, tz) do
+    {:ok, owner_bin} = Ecto.UUID.dump(owner.uuid)
+
+    TestRepo.update_all(
+      from(u in "phoenix_kit_users", where: u.uuid == ^owner_bin),
+      set: [user_timezone: tz]
+    )
+
+    {:ok, event} =
+      Events.create_event(scope_of(owner, ["calendar"]), owner.uuid, %{
+        "title" => "Their standup",
+        "starts_at" => DateTime.new!(Date.utc_today(), ~T[06:00:00], "Etc/UTC"),
+        "ends_at" => DateTime.new!(Date.utc_today(), ~T[07:00:00], "Etc/UTC")
+      })
+
+    event
+  end
+
   defp build_conn_for do
     Phoenix.ConnTest.build_conn() |> Plug.Test.init_test_session(%{})
   end
@@ -637,9 +657,10 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
       html = render(view)
 
       today = Date.to_iso8601(Date.utc_today())
-      # indicator names both offsets; times default to the VIEWER's frame
-      assert html =~ "UTC+1"
-      assert html =~ "UTC+3"
+      # indicator names both zones (core's labels); times default to the
+      # VIEWER's frame
+      assert html =~ PhoenixKit.Settings.get_timezone_label("1")
+      assert html =~ PhoenixKit.Settings.get_timezone_label("3")
       assert html =~ ~s(name="owner_tz_entry")
       assert html =~ ~s(value="#{today}T09:00")
 
@@ -689,6 +710,91 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
 
       view |> element("button", "New event") |> render_click()
       refute render(view) =~ ~s(name="owner_tz_entry")
+    end
+
+    test "two IANA zones are told apart and named by their ids",
+         %{conn: conn, me: me, other: other} do
+      # This is the boss's 2026-09-05 finding: `Europe/Warsaw` and
+      # `America/New_York` used to compare EQUAL (the offset parser could not
+      # read an id and answered 0 for both), so the indicator never appeared.
+      # And when it did appear, the label was a `Float.parse/1` of the id —
+      # "UTC" for both sides.
+      event = event_on(other, "America/New_York")
+
+      conn =
+        put_test_scope(
+          conn,
+          fake_scope(
+            user_uuid: me.uuid,
+            permissions: ["calendar", "calendar.view_others", "calendar.edit_others"],
+            user_timezone: "Europe/Warsaw"
+          )
+        )
+
+      {:ok, view, _} = live(conn, @path)
+      send(view.pid, {:calendar_event_click, event.uuid})
+      html = render(view)
+
+      assert html =~ ~s(name="owner_tz_entry")
+      assert html =~ PhoenixKit.Settings.get_timezone_label("America/New_York")
+      assert html =~ PhoenixKit.Settings.get_timezone_label("Europe/Warsaw")
+      refute html =~ "is in UTC —"
+    end
+
+    test "zones that never disagree show no indicator, even across an id and a legacy offset",
+         %{conn: conn, me: me, other: other} do
+      # Helsinki and Tallinn share a rule; Johannesburg never moves, so it IS
+      # the fixed offset "2" all year.
+      for {theirs, mine} <- [
+            {"Europe/Helsinki", "Europe/Tallinn"},
+            {"Africa/Johannesburg", "2"}
+          ] do
+        event = event_on(other, theirs)
+
+        conn =
+          put_test_scope(
+            conn,
+            fake_scope(
+              user_uuid: me.uuid,
+              permissions: ["calendar", "calendar.view_others", "calendar.edit_others"],
+              user_timezone: mine
+            )
+          )
+
+        {:ok, view, _} = live(conn, @path)
+        send(view.pid, {:calendar_event_click, event.uuid})
+        refute render(view) =~ ~s(name="owner_tz_entry"), "#{theirs} vs #{mine}"
+      end
+    end
+
+    test "a zone with daylight saving differs from a fixed offset in EVERY season",
+         %{conn: conn, me: me, other: other} do
+      # A viewer on Europe/London against an owner who has no zone of their
+      # own — so the site default, the legacy "0" every install starts with.
+      # The two agree in winter and disagree in summer; the answer must not
+      # depend on which of those it is today, or the checkbox would appear
+      # in March and vanish in October with nothing changed. Comparing the
+      # offsets "right now" gets this wrong for half the year — and which
+      # half depends on the hemisphere, so Sydney against "10" is the same
+      # case with the seasons swapped: between them, one of the two catches
+      # a today's-offset comparison whenever the suite runs.
+      for {theirs, mine} <- [{nil, "Europe/London"}, {"10", "Australia/Sydney"}] do
+        event = event_on(other, theirs)
+
+        conn =
+          put_test_scope(
+            conn,
+            fake_scope(
+              user_uuid: me.uuid,
+              permissions: ["calendar", "calendar.view_others", "calendar.edit_others"],
+              user_timezone: mine
+            )
+          )
+
+        {:ok, view, _} = live(conn, @path)
+        send(view.pid, {:calendar_event_click, event.uuid})
+        assert render(view) =~ ~s(name="owner_tz_entry"), "#{inspect(theirs)} vs #{mine}"
+      end
     end
   end
 
