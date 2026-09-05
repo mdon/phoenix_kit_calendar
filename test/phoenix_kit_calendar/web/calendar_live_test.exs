@@ -712,6 +712,34 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
       refute render(view) =~ ~s(name="owner_tz_entry")
     end
 
+    test "today is the viewer's today, not UTC's", %{conn: conn, me: me} do
+      # UTC+14 and UTC-12 are 26 hours apart, so they never share a date:
+      # whatever the clock says when the suite runs, at least one of them is
+      # not on UTC's date. The highlighted cell (aria-current) and the "New
+      # event" prefill both come from the same assign.
+      for tz <- ["Pacific/Kiritimati", "14", "-12"] do
+        conn =
+          put_test_scope(
+            conn,
+            fake_scope(user_uuid: me.uuid, permissions: ["calendar"], user_timezone: tz)
+          )
+
+        {:ok, view, html} = live(conn, @path)
+
+        expected =
+          DateTime.utc_now()
+          |> PhoenixKit.Utils.Date.shift_to_offset(tz)
+          |> DateTime.to_date()
+          |> Date.to_iso8601()
+
+        assert [_, ^expected] = Regex.run(~r/aria-current="date"[^>]*data-date="([^"]+)"/, html),
+               "highlighted today for #{tz}"
+
+        view |> element("button", "New event") |> render_click()
+        assert render(view) =~ ~s(value="#{expected}T09:00"), "New event prefill for #{tz}"
+      end
+    end
+
     test "two IANA zones are told apart and named by their ids",
          %{conn: conn, me: me, other: other} do
       # This is the boss's 2026-09-05 finding: `Europe/Warsaw` and
@@ -778,7 +806,14 @@ defmodule PhoenixKitCalendar.Web.CalendarLiveTest do
       # half depends on the hemisphere, so Sydney against "10" is the same
       # case with the seasons swapped: between them, one of the two catches
       # a today's-offset comparison whenever the suite runs.
-      for {theirs, mine} <- [{nil, "Europe/London"}, {"10", "Australia/Sydney"}] do
+      # Casablanca is the case a seasonal sample misses: UTC+1 in January
+      # and July both, UTC+0 only during Ramadan, which wanders through the
+      # year — so against "1" it must still differ.
+      for {theirs, mine} <- [
+            {nil, "Europe/London"},
+            {"10", "Australia/Sydney"},
+            {"1", "Africa/Casablanca"}
+          ] do
         event = event_on(other, theirs)
 
         conn =

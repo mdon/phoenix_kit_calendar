@@ -113,19 +113,23 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       end
     end
 
-    today = Date.utc_today()
-    {from, until} = DateHelpers.visible_range(:month, today)
-
     can_view_others? =
       Scope.can?(scope, "calendar.view_others") or Scope.can?(scope, "calendar.edit_others")
 
     can_edit_others? = Scope.can?(scope, "calendar.edit_others")
 
-    # Offset-hours strings, core's timezone model (user column → site
-    # "time_zone" setting → "0"). Storage is UTC; every wall-clock the
-    # viewer sees or types is converted through these.
+    # Timezone values (an IANA id or a legacy offset), core's model (user
+    # column → site "time_zone" setting → "0"). Storage is UTC; every
+    # wall-clock the viewer sees or types is converted through these.
     site_tz = site_timezone()
     viewer_tz = viewer_timezone(scope, site_tz)
+
+    # The VIEWER's today, not UTC's — the same basis the widgets use
+    # (`WidgetSupport.local_today/1`). From UTC, a Tallinn viewer between
+    # local midnight and 03:00 had yesterday highlighted, and on the first of
+    # a month the page opened on the previous month.
+    today = DateTime.utc_now() |> DateUtils.shift_to_offset(viewer_tz) |> DateTime.to_date()
+    {from, until} = DateHelpers.visible_range(:month, today)
 
     socket =
       socket
@@ -991,16 +995,26 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       TimeZone.identifier?(tz)
   end
 
-  # What noon means in UTC on a January and a July day of this year. A zone
-  # with a daylight-saving rule differs from any fixed offset on one of the
-  # two; a zone without one differs on both or neither. Goes through
-  # `parse_datetime_local/2`, which every core in the pin range has and which
-  # resolves per instant on the ones that know IANA ids.
+  # What noon means in UTC on the 1st and 15th of every month of this year.
+  # A fixed offset gives the same answer all year, so it equals a zone only
+  # if that zone never moves; any daylight-saving rule fails one of the
+  # samples. Twice a month rather than once a season on purpose: Morocco
+  # (`Africa/Casablanca`) is UTC+1 in January AND July and drops to UTC+0
+  # only for Ramadan, a month that wanders through the year — two samples
+  # called it a fixed "+1". Fortnightly catches any regime that lasts two
+  # weeks, which every real one does. This year's rules, not "forever":
+  # rules change, and the question is whether the two disagree under the
+  # rules in force. Goes through `parse_datetime_local/2`, which every core
+  # in the pin range has and which resolves per instant on the ones that
+  # know IANA ids.
   defp year_signature(tz) do
     year = Date.utc_today().year
 
-    for day <- ["#{year}-01-15", "#{year}-07-15"] do
-      case DateUtils.parse_datetime_local("#{day}T12:00", tz) do
+    for month <- 1..12, day <- [1, 15] do
+      case DateUtils.parse_datetime_local(
+             "#{year}-#{String.pad_leading("#{month}", 2, "0")}-#{String.pad_leading("#{day}", 2, "0")}T12:00",
+             tz
+           ) do
         {:ok, utc} -> DateTime.to_unix(utc)
         _ -> nil
       end
