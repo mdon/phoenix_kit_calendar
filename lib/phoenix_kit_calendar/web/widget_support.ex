@@ -104,15 +104,29 @@ defmodule PhoenixKitCalendar.Web.WidgetSupport do
   def on_date?(event, date, tz), do: Enum.any?(occupied_dates(event, tz), &(&1 == date))
 
   @doc """
-  Chronological sort key. An all-day event sorts at the very start of its day
-  (00:00), so events read soonest-first across days AND all-day events lead a
-  single day's agenda — one key serves both the Upcoming and Today widgets.
+  Chronological sort key IN THE VIEWER'S FRAME. An all-day event sorts at the
+  very start of its day (00:00), so events read soonest-first across days AND
+  all-day events lead a single day's agenda — one key serves both the Upcoming
+  and Today widgets.
+
+  Both kinds must answer in the SAME frame or the ordering breaks: an all-day
+  `starts_on` is a LOCAL calendar date, while `starts_at` is a true UTC
+  instant. Compared directly, an early-morning timed event sorted ahead of its
+  own day's all-day events for every viewer east of UTC — 02:00 in Tallinn is
+  23:00Z the day before — which put it under the previous day in Upcoming and
+  above the all-day rows the Today widget promises to lead with. The timed key
+  is therefore the viewer's wall clock, labelled UTC so the two compare.
   """
-  @spec sort_key(Event.t()) :: DateTime.t()
-  def sort_key(%Event{all_day: true} = event),
+  @spec sort_key(Event.t(), String.t()) :: DateTime.t()
+  def sort_key(%Event{all_day: true} = event, _tz),
     do: DateTime.new!(event.starts_on, ~T[00:00:00], "Etc/UTC")
 
-  def sort_key(%Event{} = event), do: event.starts_at
+  def sort_key(%Event{} = event, tz) do
+    event.starts_at
+    |> PhoenixKit.Utils.Date.shift_to_offset(tz)
+    |> DateTime.to_naive()
+    |> DateTime.from_naive!("Etc/UTC")
+  end
 
   @doc """
   A scale-aware self-fit font-size style: the type grows with its cq slot but

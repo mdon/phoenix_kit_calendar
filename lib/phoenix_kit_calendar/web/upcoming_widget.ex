@@ -42,12 +42,13 @@ defmodule PhoenixKitCalendar.Web.UpcomingWidget do
   # soft to []). Drop events already finished, soonest first, cap at the limit.
   defp upcoming_events(scope, limit) do
     today = WidgetSupport.local_today(scope)
+    tz = WidgetSupport.viewer_tz(scope)
     now = DateTime.utc_now()
 
     scope
     |> WidgetSupport.fetch_events(today, Date.add(today, @horizon_days))
     |> Enum.reject(&past?(&1, now, today))
-    |> Enum.sort_by(&WidgetSupport.sort_key/1, DateTime)
+    |> Enum.sort_by(&WidgetSupport.sort_key(&1, tz), DateTime)
     |> Enum.take(limit)
   rescue
     _ -> []

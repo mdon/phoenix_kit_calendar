@@ -15,6 +15,7 @@ defmodule PhoenixKitCalendar.Web.WidgetTest do
   alias PhoenixKitCalendar.Web.MiniMonthWidget
   alias PhoenixKitCalendar.Web.TodayAgendaWidget
   alias PhoenixKitCalendar.Web.UpcomingWidget
+  alias PhoenixKitCalendar.Web.WidgetSupport
 
   setup do
     {:ok, _} = PhoenixKitCalendar.enable_system()
@@ -48,6 +49,44 @@ defmodule PhoenixKitCalendar.Web.WidgetTest do
         "all_day" => "false",
         "starts_at" => s,
         "ends_at" => e
+      })
+
+    event
+  end
+
+  # The same scope with the viewer sitting in `tz` — the widgets read the value
+  # straight off the scope's user, so nothing has to be written to the row.
+  defp scope_in(user, tz), do: %{scope_for(user) | user: %{user | user_timezone: tz}}
+
+  # An all-day event covering exactly `date` (the stored end is EXCLUSIVE).
+  defp all_day_on(owner, title, %Date{} = date) do
+    {:ok, event} =
+      Events.create_event(scope_for(owner), owner.uuid, %{
+        "title" => title,
+        "all_day" => "true",
+        "starts_on" => Date.to_iso8601(date),
+        "ends_on" => Date.to_iso8601(Date.add(date, 1))
+      })
+
+    event
+  end
+
+  # A one-hour event at `time` as a WALL CLOCK in `tz` — through the same core
+  # helper the form uses, so the stored instant is the one a person in `tz`
+  # would have typed.
+  defp timed_local(owner, title, %Date{} = date, %Time{} = time, tz) do
+    {:ok, s} =
+      PhoenixKit.Utils.Date.parse_datetime_local(
+        "#{Date.to_iso8601(date)}T#{Calendar.strftime(time, "%H:%M")}",
+        tz
+      )
+
+    {:ok, event} =
+      Events.create_event(scope_for(owner), owner.uuid, %{
+        "title" => title,
+        "all_day" => "false",
+        "starts_at" => s,
+        "ends_at" => DateTime.add(s, 1, :hour)
       })
 
     event
@@ -281,6 +320,52 @@ defmodule PhoenixKitCalendar.Web.WidgetTest do
         )
 
       assert html =~ ~r/Earlier event.*Later event/s
+    end
+
+    test "Today leads with the all-day rows for a viewer east of UTC", %{alice: alice} do
+      # The sort key mixed frames: an all-day event's `starts_on` is a LOCAL
+      # date read at 00:00, while a timed event's `starts_at` is a true UTC
+      # instant. 02:00 in Tallinn is 23:00Z the day BEFORE, so the standup
+      # sorted ahead of the all-day row this widget promises to lead with.
+      tz = "Europe/Tallinn"
+      scope = scope_in(alice, tz)
+      today = WidgetSupport.local_today(scope)
+
+      timed_local(alice, "Early standup", today, ~T[02:00:00], tz)
+      all_day_on(alice, "Company offsite", today)
+
+      html =
+        render_component(TodayAgendaWidget,
+          id: "t",
+          scope: scope,
+          settings: %{},
+          size: %{w: 3, h: 3}
+        )
+
+      assert html =~ ~r/Company offsite.*Early standup/s
+    end
+
+    test "Upcoming keeps an early-morning event under its own day", %{alice: alice} do
+      # Same mismatch across days: tomorrow 02:00 in Tallinn is today 23:00Z,
+      # which fell between today's and tomorrow's all-day rows.
+      tz = "Europe/Tallinn"
+      scope = scope_in(alice, tz)
+      today = WidgetSupport.local_today(scope)
+      tomorrow = Date.add(today, 1)
+
+      all_day_on(alice, "Today all-day", today)
+      timed_local(alice, "Tomorrow dawn", tomorrow, ~T[02:00:00], tz)
+      all_day_on(alice, "Tomorrow all-day", tomorrow)
+
+      html =
+        render_component(UpcomingWidget,
+          id: "u",
+          scope: scope,
+          settings: %{},
+          size: %{w: 3, h: 3}
+        )
+
+      assert html =~ ~r/Today all-day.*Tomorrow all-day.*Tomorrow dawn/s
     end
   end
 end

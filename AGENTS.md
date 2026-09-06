@@ -55,7 +55,7 @@
 
 ## Dashboard widgets
 
-Three widgets via the duck-typed `phoenix_kit_widgets/0` contract, all queried through the authorized context path with the widget's `scope` assign — a shared dashboard never leaks anyone else's events (pinned by `test/phoenix_kit_calendar/web/widget_test.exs`). All render defensively (nil scope/settings/size → empty state, never a crash) via the shared `Web.WidgetSupport` helper:
+Three widgets via the duck-typed `phoenix_kit_widgets/0` contract, all queried through the authorized context path with the widget's `scope` assign — a shared dashboard never leaks anyone else's events (pinned by `test/phoenix_kit_calendar/web/widget_test.exs`). All render defensively (nil scope/settings/size → empty state, never a crash) via the shared `Web.WidgetSupport` helper, and every helper in it answers in the VIEWER's frame — `local_today/1`, `occupied_dates/2`, `on_date?/3` and `sort_key/2`. That last one takes the tz for a reason: an all-day `starts_on` is a LOCAL date and `starts_at` is a true UTC instant, so comparing the two raw sorted an early-morning timed event ahead of its own day's all-day rows for every viewer east of UTC (02:00 in Tallinn is 23:00Z the day before) — the timed key is the viewer's wall clock, labelled UTC so the two compare:
 
 - `calendar.upcoming` (`Web.UpcomingWidget`) — the viewer's next events (60-day horizon), soonest-first, with `limit` + `show_location` settings.
 - `calendar.today` (`Web.TodayAgendaWidget`) — the viewer's schedule for today, all-day first then by time.

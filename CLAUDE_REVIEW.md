@@ -1,161 +1,170 @@
-# Review: PR #4 — Update the calendar dashboard widgets for the screenful lattice
+# Review: PR #6 — Resolve every timezone question at its own instant, not today's
 
-Reviewed against `AGENTS.md`'s "Dashboard widgets" section and the duck-typed
-`phoenix_kit_widgets/0` contract with the sibling `phoenix_kit_dashboards` package.
-Scope: `lib/phoenix_kit_calendar.ex` (widget declarations), the three widget
-LiveComponents, `Web.WidgetSupport`, and `test/phoenix_kit_calendar/web/widget_test.exs`,
-as merged at `56c744c` (merge of PR #4, branch `mdon/main`), current tree at `497e251`.
+Reviewed against `AGENTS.md`'s (rewritten) timezone paragraph and the `Time semantics`
+moduledoc of `Web.CalendarLive`. Scope: `lib/phoenix_kit_calendar/events.ex`,
+`lib/phoenix_kit_calendar/web/calendar_live.ex`,
+`lib/phoenix_kit_calendar/web/widget_support.ex` and the two test files, as merged at
+`5747c9e` (squash of PR #6, author Max Don), current tree at `6ca87d0`.
 
-Methodology: read every changed file with full surrounding context (not just diff
-hunks); cross-checked the calendar's new widget-declaration fields (`views`,
-lattice-scale `default_size`/`min_size`, dropped `max_size`) and the widgets' new
-`--pk-scale` / container-query CSS against the ACTUAL current source of the sibling
-`/workspace/phoenix_kit_dashboards` package (not assumed) to verify the duck-typed
-contract is genuinely honored on both sides; did an arithmetic pixel-budget check of
-the mini-month widget's rendered content against its declared minimum box size.
+Methodology: read every changed function with full surrounding context, then read the
+CORE side of every helper the PR now leans on — `PhoenixKit.Utils.Date`
+(`parse_datetime_local/2`, `shift_to_offset/2`, `offset_to_seconds/1`),
+`PhoenixKit.Utils.TimeZone` (`identifier?/1`, `effectively_same?/2`, `same_group?/2`,
+`from_wall/2`, `shift/2`, `label/1`) and `PhoenixKit.Settings.get_timezone_label/1` —
+rather than taking the commit message's claims about them at face value. Two of those
+claims were checked by running against the compiled tz database, and the availability
+claims were checked against core's own git history. The PR's diff itself is correct;
+the one finding is a place the sweep did not reach.
 
 ## Findings
 
-### BUG-HIGH — mini-month widget silently clips a 6-row month at its own declared minimum size
+### BUG-MEDIUM — the widgets' sort key still mixes an instant with a local date
 
-`lib/phoenix_kit_calendar/web/mini_month_widget.ex`'s card-body wrapper changed from
-`overflow-auto` to `overflow-hidden`:
+`lib/phoenix_kit_calendar/web/widget_support.ex`
 
 ```elixir
-<div class="card-body p-3 flex items-center justify-center overflow-hidden">
+def sort_key(%Event{all_day: true} = event),
+  do: DateTime.new!(event.starts_on, ~T[00:00:00], "Etc/UTC")
+
+def sort_key(%Event{} = event), do: event.starts_at
 ```
 
-`calendar.mini_month`'s declared `min_size` is `%{w: 8, h: 8}` (`lib/phoenix_kit_calendar.ex`)
-— 8 lattice cells × the dashboards package's documented 25px nominal cell
-(`phoenix_kit_dashboards/lib/phoenix_kit_dashboards/lattice.ex`) = a 200×200px nominal
-box. After subtracting the dashboards frame chrome around a placed widget (outer
-`m-[2px]` + `border` + the drag-handle/action-button bar in
-`phoenix_kit_dashboards/lib/phoenix_kit_dashboards/web/builder_components.ex`) and this
-widget's own `card-body p-3` padding, the actual available content height at min size
-is **≈138px**.
+This is the same mistake the PR swept for, one module over. `starts_on` is a **local
+calendar date** — the whole point of the all-day DATE pair — and it is read here at
+00:00 as if it were a UTC instant. `starts_at` is a **true UTC instant**. The two keys
+are then compared against each other by `Enum.sort_by(..., DateTime)` in both widgets
+that use them.
 
-`PhoenixLiveCalendar.Components.MiniCalendar`'s rendered content for a 6-row month
-(header ~24px + day-name row ~20px + 6 week-rows × ~33px when a week has an event dot)
-is **≈242px** — roughly **104px / ~3 week-rows too tall** for the available box. Because
-the wrapper also has `items-center justify-center`, the overflow clips symmetrically
-(top and bottom), so both the tail of the month and part of the header can vanish.
+Everything else in `WidgetSupport` had already been moved into the viewer's frame —
+`local_today/1`, `occupied_dates/2`, `on_date?/3` — so the sort key was the last
+UTC-framed value in the file, and the module's own docstring promises an ordering it
+cannot deliver.
 
-With the *previous* `overflow-auto`, a user could still scroll to see the clipped
-weeks; `overflow-hidden` makes them simply gone, with no recovery, at exactly the box
-size the widget itself advertises as its supported minimum. Several months a year need
-6 grid rows, so this isn't an edge case.
+A timed event sorts ahead of an all-day event on the same local day whenever its local
+start time is earlier than the viewer's UTC offset. Concretely, for a Tallinn viewer
+(UTC+3 in summer):
 
-**Fix applied:** reverted the card-body wrapper to `overflow-auto`
-(`mini_month_widget.ex`), restoring scroll-to-recover behavior. Locked in with a new
-test, `test/phoenix_kit_calendar/web/widget_test.exs` — "mini_month sizing... stays
-scrollable at its declared min_size instead of hard-clipping" — asserting the
-`card-body` renders with `overflow-auto`.
+- `TodayAgendaWidget` — a 02:00 standup is stored `23:00Z the previous day`, so it
+  sorts **before** `today 00:00Z` and leads the agenda, above the all-day rows the
+  widget's moduledoc says come first ("all-day events first, then timed events in
+  chronological order").
+- `UpcomingWidget` — tomorrow's 02:00 event is stored `today 23:00Z`, landing
+  **between** today's all-day row (`today 00:00Z`) and tomorrow's (`tomorrow 00:00Z`).
+  In a list whose only job is "soonest first", it reads as belonging to the wrong day.
 
-**Not fixed, flagged for follow-up:** this only restores the old safety net: it
-doesn't make the mini-month fit its box at min size. Unlike the `Upcoming`/`Today`
-widgets (which this same PR gave a genuine self-fit treatment via `container-type:size`
-+ `cqh` clamped type + `--pk-scale`), `MiniMonthWidget` has no such treatment — it
-can't, since `MiniCalendar`'s cell/dot sizes are fixed Tailwind classes owned by the
-external `phoenix_live_calendar` dependency, not something this module controls
-without wrapping it in its own scaling logic (e.g. a CSS `transform: scale()` container
-driven by cq, or a taller `min_size`). Either fix is a real design decision beyond a
-one-line correction, so it's left as a follow-up rather than attempted here.
+Reachable for every viewer east of UTC with an early-morning event — most of Europe and
+Asia — and symmetrically for negative offsets with late-evening ones. Cosmetic only:
+the ordering is wrong, the SET of events is not (`fetch_events/3` and `on_date?/3` were
+already frame-correct), so nothing is disclosed or hidden.
 
-### Contract verification (no issues found) — duck-typed `phoenix_kit_widgets/0` vs. `phoenix_kit_dashboards`
+**Fixed** by giving both kinds the same frame — the viewer's wall clock, labelled UTC so
+the two remain comparable:
 
-Checked every new/changed contract point in this PR against the ACTUAL current
-`phoenix_kit_dashboards` source (sibling checkout at `/workspace/phoenix_kit_dashboards`),
-since this is a one-way duck-typed contract with no compile-time check:
+```elixir
+@spec sort_key(Event.t(), String.t()) :: DateTime.t()
+def sort_key(%Event{all_day: true} = event, _tz),
+  do: DateTime.new!(event.starts_on, ~T[00:00:00], "Etc/UTC")
 
-- **`views` key** — genuinely read by `PhoenixKitDashboards.Widget.from_map/2` /
-  `normalize_views/2`; shape (`%{key:, name:, min_size: %{w:, h:}}`) matches exactly;
-  per-view `min_size` is honored by `Widget.min_size_for/2` for resize-hook clamping.
-- **Dropped `max_size`** — confirmed a pure no-op both before and after this PR:
-  `phoenix_kit_dashboards` hardcodes the struct's `max_size` to the lattice's global
-  max regardless of what a provider supplies (explicit comment in `widget.ex`: a
-  provider max "serves nobody" on the screenful lattice). The calendar's old
-  `max_size: %{w: 6, h: 4}` was already being silently discarded.
-- **Lattice-scale `default_size`/`min_size`** — genuinely interpreted as 25px-nominal
-  cells by `phoenix_kit_dashboards`; the PR's new `w:12,h:8`-scale values are the
-  correct order of magnitude (matching the dashboards package's own built-in widget
-  defaults), whereas the *old* small-scale values (`w:3,h:2`) would have been clamped
-  up to the lattice's floor and rendered far smaller than intended.
-- **`--pk-scale`** — a real CSS custom property, actively set by the dashboards
-  package's grid/free-fit hooks on the canvas ancestor (not aspirational), and already
-  consumed the identical way by the dashboards package's own built-in
-  `ModuleStatsWidget`. The calendar widgets' `clamp(... var(--pk-scale, 1) ...)` usage
-  matches this established, working pattern.
-- **`:view` assign** — `phoenix_kit_dashboards` passes exactly this assign name/shape
-  to every placed widget's `live_component`, sourced from the per-instance persisted
-  view selection; matches what `UpcomingWidget`/`TodayAgendaWidget` read via
-  `assigns[:view]`.
+def sort_key(%Event{} = event, tz) do
+  event.starts_at
+  |> PhoenixKit.Utils.Date.shift_to_offset(tz)
+  |> DateTime.to_naive()
+  |> DateTime.from_naive!("Etc/UTC")
+end
+```
 
-One nuance, not a defect: the dashboards package's own built-in widgets use `cq` length
-units but not `@container (...)` at-rule blocks; this PR's use of an actual
-`@container (max-height: 26px) { ... }` block in the agenda widgets is a step beyond
-existing precedent in that codebase. It's architecturally sound (each row already has
-its own `[container-type:size]`), but worth a quick manual/browser sanity check since
-nothing else in the ecosystem exercises that exact path yet.
+`shift_to_offset/2` rather than a fixed offset, for the same reason the rest of the PR
+uses the per-instant helpers: the shift has to be the one in force on the event's own
+date. Both call sites (`TodayAgendaWidget.todays_events/3`,
+`UpcomingWidget.upcoming_events/2`) already had the viewer's tz on hand. The arity
+change is safe — `WidgetSupport` is an internal helper for this module's three widgets,
+with no callers outside the repo.
 
-### IMPROVEMENT-MEDIUM — `TodayAgendaWidget`'s view logic had zero test coverage
+Two regression tests added to `widget_test.exs`'s "chronological ordering" block, both
+pinned to `Europe/Tallinn` (positive in either season, so the suite catches this
+year-round) and both confirmed to fail against the old key and pass against the new one:
 
-`UpcomingWidget` and `TodayAgendaWidget` both got the identical new `view`
-(`detailed`/`compact`, defaulting to `detailed` on anything else) rendering logic, but
-the PR's new "views" test `describe` block only exercised `UpcomingWidget`. A future
-refactor could silently break `TodayAgendaWidget`'s compact rendering or its
-unknown-view fallback with nothing to catch it.
+- *Today leads with the all-day rows for a viewer east of UTC* — a 02:00 local standup
+  must not outrank the day's all-day event.
+- *Upcoming keeps an early-morning event under its own day* — tomorrow 02:00 must sort
+  after tomorrow's all-day row, not between the two days.
 
-**Fix applied:** added the same two tests for `TodayAgendaWidget` ("compact renders
-one-line rows without the meta line" / "an unknown view falls back to detailed"),
-mirroring the existing `UpcomingWidget` coverage.
+Test helpers `scope_in/2`, `all_day_on/3` and `timed_local/5` were added alongside; the
+last builds its instant through `parse_datetime_local/2`, so the stored value is the one
+a person in that zone would actually have typed rather than a hand-copied offset.
 
-### No other correctness issues found
+### NITPICK — `load_people/1` is the one tz fallback that doesn't guard the empty string
 
-- `assigns[:view] in ["detailed", "compact"] && assigns[:view]) || "detailed"` (both
-  widgets) correctly defaults on `nil`, an unrecognized string, or absence — verified
-  against the "unknown view falls back to detailed" tests.
-- The old `WidgetSupport.compact?/1` height-flag helper was fully removed with no
-  dangling callers (`compact?`/`:compact` grep across `lib/` and `test/` — no hits).
-  `fit_text/3`'s `clamp(min, preferred, max)` argument order is consistent across all
-  eight call sites (min < max in every case).
-- `Upcoming`'s padding-slot count scales to the user's `limit` setting (up to 20)
-  rather than a fixed floor like `Today`'s (fixed at 4). At a high `limit` with few
-  real events this reserves a lot of visually empty slot space — a deliberate
-  documented tradeoff (the `N-SLOT self-fit: the limit budget of slots` comment), not
-  a bug: it keeps the widget's visual rhythm stable as events come and go, rather than
-  jumping around.
-- `mix format`/`compile --warnings-as-errors`/`credo --strict` were all clean already
-  on the merged PR; no dead code or leftover references to the removed API.
+`lib/phoenix_kit_calendar/web/calendar_live.ex:769`
+
+```elixir
+tz: u.user_timezone || site_tz
+```
+
+Every other fallback in the file guards emptiness as well as nil — `viewer_timezone/2`
+matches `is_binary(tz) and tz != ""`, and `owner_timezone/2`'s direct-lookup branch does
+the same. Here `||` catches only `nil`, so a stored `""` would become the owner's
+"effective zone", and the modal would then disagree with itself: `tz_differs?/2`
+normalizes `""` to the site default (via `normalize_tz/1`) while `input_tz` /
+`modal_owner_tz` keep the raw `""`, which core reads as UTC. The banner would name one
+zone and the entry frame would be another.
+
+**Not fixed** — not reachable through supported writes. Core's `validate_user_timezone/1`
+(`phoenix_kit/lib/phoenix_kit/users/auth/user.ex:903`) converts `""` (and any
+whitespace-only value) to `nil` before storage on every changeset that casts the field,
+so only direct SQL can produce the row. Recorded rather than patched: the three
+fallbacks disagreeing is worth knowing about, but a guard here would be dead code
+defending against a state core does not allow.
+
+## Verified, no change needed
+
+Each of these is a claim the PR makes that could have been wrong; all four hold.
+
+- **Both unguarded core calls really do predate the `~> 2.0` floor.** The commit message
+  asserts this, and the module's `core_pin_conformance_test.exs` exists because getting
+  it wrong is an `UndefinedFunctionError` for any host on an older core. Checked against
+  core's history: `Settings.get_timezone_label/1` landed in **v1.7.206** (`89d811fd`,
+  "Add a cheap timezone-label accessor that never queries roles") and
+  `Utils.Date.parse_datetime_local/2` in **v1.7.97** (`868a9b8d`). Only `TimeZone`
+  (2.13.9) needs the feature detection it has. `get_timezone_label/1` is also the cheap
+  arity — it resolves through `TimeZone.label/1` and never builds the settings-options
+  map, so no role query is added to the modal's render path.
+- **The identifier path cannot reproduce the "Alice is in UTC — you are in UTC" shape it
+  replaces.** `effectively_same?/2` delegates two identifiers to `same_group?/2`, which
+  returns `false` when either zone has no group — a zone would then differ from
+  *itself*. Ran the check against the compiled tz database: all **447** of core's
+  `identifiers/0` resolve to a group, none orphaned, so `same_zone?/2`'s identifier
+  branch is total over every value `identifier?/1` admits.
+- **`year_signature/1`'s cost is not a problem in the render path.** It is 24
+  `parse_datetime_local/2` calls per zone, recomputed on every `validate` event via
+  `assign_tz_frame/2`, which looks alarming. Measured: **0.30 ms** for a full mixed-pair
+  `tz_differs?/2` (both signatures, 48 conversions). No memoization warranted.
+- **The IANA change to `shift_to_offset/2` is inert for the grid.** Since core routed it
+  through `TimeZone.shift/2`, an IANA id yields a genuinely zoned `DateTime` (its
+  `time_zone` names the zone) where a legacy offset still yields a UTC-labelled fake.
+  `to_lib_event/3` feeds those to `PhoenixLiveCalendar.Event`, so the difference matters
+  only if the lib compares instants. It doesn't for placement — `first_date/1`,
+  `last_date/1`, `occurs_on?/2` all go through its private `to_date/1`, i.e. the wall
+  clock — and where it does use `DateTime.compare/2` (sorting), every event has been
+  shifted by the same zone, so the relative order is identical either way.
+
+Also spot-checked and correct as written: `local_midnight/2`'s fallback matches the `0`
+that `offset_to_seconds/1` used to answer for an unusable value (and the PR pins it);
+noon is the right sample instant for `year_signature/1`, since DST transitions happen
+between 00:00 and 03:00 and can never make it ambiguous or skipped; `Keyword.get(opts,
+:viewer_tz, "0")` still behaves for an explicit `nil` because `from_wall/2` reads `nil`
+as UTC; and `UpcomingWidget.past?/3` correctly compares timed events as instants while
+comparing all-day ones as local dates.
 
 ## Validation gate
 
-Run with `PHOENIX_KIT_PATH=../phoenix_kit` per `AGENTS.md`'s cross-repo-gate note
-(`PHOENIX_LIVE_CALENDAR_PATH` intentionally left unset — no local checkout of that repo
-exists in this workspace, so it resolves to the published Hex package instead, which is
-within the module's supported range).
+`mix precommit` — `compile --force --warnings-as-errors`, `deps.unlock --check-unused`,
+`hex.audit`, then `quality.ci` (`format --check-formatted`, `credo --strict`,
+`dialyzer`). Plus `mix test` (125 tests) against a real Postgres. Results in the
+commit that carries this review.
 
-- **Environment fix required first:** `mix test` initially failed to even boot
-  (`Could not start application ueberauth_apple`) — `mix.lock` was stale relative to
-  the local `phoenix_kit` path dependency, which recently dropped `ueberauth_apple` /
-  `httpoison` (unmaintained + CVE cleanup, per its own `mix.exs` comments). `mix
-  deps.get` resolved it; `mix.lock` in this repo was already free of those entries
-  after regeneration (no diff to commit) — this was pre-existing local-checkout drift,
-  unrelated to PR #4's own changes.
-- `mix format --check-formatted` — clean.
-- `mix compile --warnings-as-errors` (dev and test) — clean, no warnings, before and
-  after this review's fixes.
-- `mix credo --strict` — 339 mods/funs analyzed, no issues, before and after.
-- `mix test` — **could not run the DB-backed portion**: no PostgreSQL server and no
-  root access in this sandbox (same constraint noted in the PR #2 review). 12
-  DB-independent tests pass; 103 DB-dependent tests are tagged and skipped (was 100
-  before this review added 3 new tests — all three, including the mini-month
-  regression test, compile and get correctly tag-excluded, confirming they're
-  well-formed). **The DB-backed suite (`mix test.setup && mix test`) should still be
-  run in a real environment with Postgres before/after merge** to actually execute the
-  new regression tests.
-
-## Not addressed
-
-Per `AGENTS.md`: **"Releases/version bumps are Max-only — PRs land at the current
-version."** No version bump, CHANGELOG entry, or Hex publish was performed, regardless
-of how this review was invoked. The version remains `0.1.0`.
+Run against the **published** `phoenix_kit` pin (2.15.1 from Hex), not the local
+checkout: `AGENTS.md`'s cross-repo-gate note dates from when the calendar's V141/V142
+migrations were still unreleased, and core has long since shipped past them — the
+standalone suite is green on the published pin now. That note is stale and could be
+dropped the next time `AGENTS.md` is touched.
