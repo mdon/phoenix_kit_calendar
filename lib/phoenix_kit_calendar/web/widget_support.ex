@@ -8,15 +8,16 @@ defmodule PhoenixKitCalendar.Web.WidgetSupport do
   widget must never take the dashboard down with it.
 
   Times are handled the same way as the rest of the calendar: events are stored
-  in UTC and shown in the viewer's offset-hours frame (their `user_timezone`
-  setting → site `time_zone` → `"0"`).
+  in UTC and shown in the viewer's timezone (their `user_timezone` setting →
+  site `time_zone` → `"0"`; an IANA id or a legacy fixed offset, always through
+  core's per-instant helpers).
   """
 
   alias PhoenixKit.Users.Auth.Scope
   alias PhoenixKitCalendar.Events
   alias PhoenixKitCalendar.Schemas.Event
 
-  @doc "The viewer's offset-hours timezone string (never raises)."
+  @doc "The viewer's timezone value — an IANA id or a legacy offset (never raises)."
   @spec viewer_tz(term()) :: String.t()
   def viewer_tz(scope) do
     case scope && scope.user do

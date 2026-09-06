@@ -55,6 +55,14 @@ defmodule PhoenixKitCalendar.EventsTest do
     )
   end
 
+  # A Tallinn wall clock → the UTC instant, from the tz database itself so the
+  # expected values are not hand-copied offsets.
+  defp tallinn_to_utc(%NaiveDateTime{} = local) do
+    local
+    |> DateTime.from_naive!("Europe/Tallinn", Tz.TimeZoneDatabase)
+    |> DateTime.shift_zone!("Etc/UTC", Tz.TimeZoneDatabase)
+  end
+
   describe "create_event/4 authorization" do
     test "own calendar with the base key succeeds", %{alice: alice} do
       scope = scope_for(alice, ["calendar"])
@@ -214,6 +222,121 @@ defmodule PhoenixKitCalendar.EventsTest do
         Events.list_events(scope, alice.uuid, ~D[2026-07-01], ~D[2026-08-01], viewer_tz: "3")
 
       assert event.uuid in Enum.map(local, & &1.uuid)
+    end
+
+    test "the viewer-local window follows the zone's offset ON THE DATE, not today's",
+         %{alice: alice} do
+      scope = scope_for(alice, ["calendar"])
+
+      # Europe/Tallinn is UTC+2 in January and UTC+3 in July. Whichever season
+      # the suite runs in, one of these two months sits across a
+      # daylight-saving switch from "now" — where a snapshot of today's offset
+      # applied to both bounds shifts the whole window by an hour: the last
+      # local hour of the month falls out, and the last hour of the previous
+      # month leaks in (or the first hours, in the other direction).
+      #
+      # Four probes per month, each 30 minutes long: the first and last local
+      # half hour INSIDE the month, and the half hours just before and after.
+      probes =
+        for {month, from, until} <- [
+              {:january, ~D[2026-01-01], ~D[2026-02-01]},
+              {:july, ~D[2026-07-01], ~D[2026-08-01]}
+            ],
+            {label, local_start} <- [
+              {:before, NaiveDateTime.new!(Date.add(from, -1), ~T[23:30:00])},
+              {:first, NaiveDateTime.new!(from, ~T[00:30:00])},
+              {:last, NaiveDateTime.new!(Date.add(until, -1), ~T[23:30:00])},
+              {:after, NaiveDateTime.new!(until, ~T[00:30:00])}
+            ] do
+          starts_at = tallinn_to_utc(local_start)
+
+          {:ok, event} =
+            Events.create_event(scope, alice.uuid, %{
+              "title" => "#{month} #{label}",
+              "starts_at" => DateTime.to_iso8601(starts_at),
+              "ends_at" => DateTime.to_iso8601(DateTime.add(starts_at, 30, :minute))
+            })
+
+          {{month, label}, event.uuid}
+        end
+        |> Map.new()
+
+      for {month, from, until} <- [
+            {:january, ~D[2026-01-01], ~D[2026-02-01]},
+            {:july, ~D[2026-07-01], ~D[2026-08-01]}
+          ] do
+        {:ok, events} =
+          Events.list_events(scope, alice.uuid, from, until, viewer_tz: "Europe/Tallinn")
+
+        assert Enum.map(events, & &1.uuid) |> Enum.sort() ==
+                 Enum.sort([probes[{month, :first}], probes[{month, :last}]]),
+               "#{month}: expected exactly the first and last local half hours"
+      end
+    end
+
+    test "zones that switch AT midnight keep the repeated or skipped hour on the right day",
+         %{alice: alice} do
+      scope = scope_for(alice, ["calendar"])
+
+      # Havana falls back 2026-11-01 01:00 → 00:00, so 00:00–01:00 Nov 1 happens
+      # twice (04:00Z–06:00Z). Both belong to Nov 1: local midnight resolves to
+      # the FIRST 00:00. Santiago falls back 2026-04-05 00:00 → 23:00 Apr 4, so
+      # 23:00–00:00 Apr 4 happens twice (02:00Z–04:00Z) and Apr 5 starts at
+      # 04:00Z; it springs forward 2026-09-06 00:00 → 01:00, so Sep 6 has no
+      # 00:00 and starts at 01:00 (04:00Z).
+      cases = [
+        {"America/Havana", ~D[2026-11-01], ~U[2026-11-01 04:30:00Z], :inside},
+        {"America/Havana", ~D[2026-11-01], ~U[2026-11-01 05:30:00Z], :inside},
+        {"America/Havana", ~D[2026-11-01], ~U[2026-11-01 03:30:00Z], :day_before},
+        {"America/Santiago", ~D[2026-04-05], ~U[2026-04-05 03:30:00Z], :day_before},
+        {"America/Santiago", ~D[2026-04-05], ~U[2026-04-05 04:30:00Z], :inside},
+        {"America/Santiago", ~D[2026-09-06], ~U[2026-09-06 03:30:00Z], :day_before},
+        {"America/Santiago", ~D[2026-09-06], ~U[2026-09-06 04:30:00Z], :inside}
+      ]
+
+      for {tz, day, starts_at, expected} <- cases do
+        {:ok, event} =
+          Events.create_event(scope, alice.uuid, %{
+            "title" => "#{tz} #{DateTime.to_iso8601(starts_at)}",
+            "starts_at" => DateTime.to_iso8601(starts_at),
+            "ends_at" => DateTime.to_iso8601(DateTime.add(starts_at, 15, :minute))
+          })
+
+        {:ok, on_day} =
+          Events.list_events(scope, alice.uuid, day, Date.add(day, 1), viewer_tz: tz)
+
+        {:ok, day_before} =
+          Events.list_events(scope, alice.uuid, Date.add(day, -1), day, viewer_tz: tz)
+
+        assert event.uuid in Enum.map(on_day, & &1.uuid) == (expected == :inside),
+               "#{tz} #{starts_at} on #{day}"
+
+        assert event.uuid in Enum.map(day_before, & &1.uuid) == (expected == :day_before),
+               "#{tz} #{starts_at} on #{Date.add(day, -1)}"
+      end
+    end
+
+    test "an unresolvable viewer zone reads the window as UTC", %{alice: alice} do
+      scope = scope_for(alice, ["calendar"])
+
+      {:ok, event} =
+        Events.create_event(scope, alice.uuid, %{
+          "title" => "Late in UTC",
+          "starts_at" => "2026-07-31T23:30:00Z",
+          "ends_at" => "2026-07-31T23:45:00Z"
+        })
+
+      for tz <- ["nonsense", "", nil] do
+        {:ok, july} =
+          Events.list_events(scope, alice.uuid, ~D[2026-07-01], ~D[2026-08-01], viewer_tz: tz)
+
+        assert event.uuid in Enum.map(july, & &1.uuid), inspect(tz)
+
+        {:ok, august} =
+          Events.list_events(scope, alice.uuid, ~D[2026-08-01], ~D[2026-09-01], viewer_tz: tz)
+
+        refute event.uuid in Enum.map(august, & &1.uuid), inspect(tz)
+      end
     end
 
     test "all-day events overlap the window by dates", %{alice: alice} do

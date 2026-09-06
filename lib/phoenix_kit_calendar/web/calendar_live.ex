@@ -38,11 +38,15 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   ## Time semantics
 
   Timed events are stored in UTC and shown/entered in the viewer's
-  timezone (core's offset-hours model: `user_timezone` column → site
-  "time_zone" setting → UTC). When the target calendar's owner sits in a
-  different offset, the modal says so and offers a checkbox to switch
-  the entry frame to THEIR timezone — toggling re-renders the same
-  instant, never reinterprets the digits. All-day events use real dates
+  timezone (core's model: `user_timezone` column → site "time_zone"
+  setting → UTC; each value an IANA id such as `Europe/Warsaw`, or a
+  legacy fixed offset such as `"2"` on rows written before core 2.13.9).
+  Every conversion goes through core's per-instant helpers, so a named
+  zone follows daylight saving on the date shown, not on the day the
+  preference was saved. When the target calendar's owner sits in a
+  different zone, the modal says so and offers a checkbox to switch the
+  entry frame to THEIR timezone — toggling re-renders the same instant,
+  never reinterprets the digits. All-day events use real dates
   (no timezone); the form's end date is INCLUSIVE ("last day") and
   shifted to the exclusive storage form at this boundary.
   """
@@ -109,19 +113,23 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
       end
     end
 
-    today = Date.utc_today()
-    {from, until} = DateHelpers.visible_range(:month, today)
-
     can_view_others? =
       Scope.can?(scope, "calendar.view_others") or Scope.can?(scope, "calendar.edit_others")
 
     can_edit_others? = Scope.can?(scope, "calendar.edit_others")
 
-    # Offset-hours strings, core's timezone model (user column → site
-    # "time_zone" setting → "0"). Storage is UTC; every wall-clock the
-    # viewer sees or types is converted through these.
+    # Timezone values (an IANA id or a legacy offset), core's model (user
+    # column → site "time_zone" setting → "0"). Storage is UTC; every
+    # wall-clock the viewer sees or types is converted through these.
     site_tz = site_timezone()
     viewer_tz = viewer_timezone(scope, site_tz)
+
+    # The VIEWER's today, not UTC's — the same basis the widgets use
+    # (`WidgetSupport.local_today/1`). From UTC, a Tallinn viewer between
+    # local midnight and 03:00 had yesterday highlighted, and on the first of
+    # a month the page opened on the previous month.
+    today = DateTime.utc_now() |> DateUtils.shift_to_offset(viewer_tz) |> DateTime.to_date()
+    {from, until} = DateHelpers.visible_range(:month, today)
 
     socket =
       socket
@@ -940,8 +948,8 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
     _ -> socket.assigns.viewer_tz
   end
 
-  # "Would these two show a different wall clock?" — which is what decides
-  # whether the modal offers "show in their timezone" at all.
+  # "Would these two EVER show a different wall clock?" — which is what
+  # decides whether the modal offers "show in their timezone" at all.
   #
   # It compared `offset_to_seconds/1`, and that could not read an IANA
   # identifier: it ran `Float.parse/1` and answered 0 for every named zone, so
@@ -949,27 +957,67 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
   # never appeared. Core fixed the parser in 2.14.1, but an offset comparison
   # is still the wrong question — two zones can share an offset today and
   # diverge in March, and the answer would flip under the user without either
-  # value changing.
+  # value changing. Two identifiers are therefore compared by their
+  # daylight-saving RULE (`TimeZone.effectively_same?/2`, which groups zones
+  # that behave identically all year).
   #
-  # `TimeZone.effectively_same?/2` asks the real question: same offset AND the
-  # same daylight-saving rule, year round.
+  # The mixed case needs the same care: a viewer on `Europe/London` against a
+  # site default that is still the legacy `"0"` (every install that never
+  # touched the setting) agrees in winter and disagrees in summer. Core's
+  # `effectively_same?/2` compares the offset *right now* for that pair — the
+  # right answer for its own "is your browser somewhere else today?" nudge,
+  # and exactly the flip this function must not have. So anything involving a
+  # legacy offset is compared by its year-round signature instead: a fixed
+  # offset only ever equals a zone that never moves.
   defp tz_differs?(a, b), do: not same_zone?(normalize_tz(a), normalize_tz(b))
 
-  # `TimeZone.effectively_same?/2` is public from core 2.14.1, and the
-  # `:phoenix_kit` requirement stays a two-segment `~> 2.0` on purpose —
-  # narrowing it to one core minor makes `mix deps.get` unsolvable for any host
-  # running this module beside a different core (see
-  # `test/core_pin_conformance_test.exs`). So it is feature-detected, with the
-  # offset comparison as the fallback it replaces.
+  defp same_zone?(a, b) do
+    if identifier?(a) and identifier?(b) do
+      TimeZone.effectively_same?(a, b)
+    else
+      year_signature(a) == year_signature(b)
+    end
+  end
+
+  # `TimeZone` is public from core 2.13.9, and the `:phoenix_kit` requirement
+  # stays a two-segment `~> 2.0` on purpose — narrowing it to one core minor
+  # makes `mix deps.get` unsolvable for any host running this module beside a
+  # different core (see `test/core_pin_conformance_test.exs`). So it is
+  # feature-detected; an older core has no identifiers to tell apart and
+  # every value takes the signature path, which is the offset comparison it
+  # always did.
   #
   # `Code.ensure_loaded?/1` as well as `function_exported?/3`: the latter
   # answers false for a module that has merely not been loaded, which under a
   # release is the normal state.
-  defp same_zone?(a, b) do
-    if Code.ensure_loaded?(TimeZone) and function_exported?(TimeZone, :effectively_same?, 2) do
-      TimeZone.effectively_same?(a, b)
-    else
-      DateUtils.offset_to_seconds(a) == DateUtils.offset_to_seconds(b)
+  defp identifier?(tz) do
+    Code.ensure_loaded?(TimeZone) and function_exported?(TimeZone, :identifier?, 1) and
+      function_exported?(TimeZone, :effectively_same?, 2) and TimeZone.identifier?(tz)
+  end
+
+  # What noon means in UTC on the 1st and 15th of every month of this year.
+  # A fixed offset gives the same answer all year, so it equals a zone only
+  # if that zone never moves; any daylight-saving rule fails one of the
+  # samples. Twice a month rather than once a season on purpose: Morocco
+  # (`Africa/Casablanca`) is UTC+1 in January AND July and drops to UTC+0
+  # only for Ramadan, a month that wanders through the year — two samples
+  # called it a fixed "+1". Fortnightly catches any regime that lasts two
+  # weeks, which every real one does. This year's rules, not "forever":
+  # rules change, and the question is whether the two disagree under the
+  # rules in force. Goes through `parse_datetime_local/2`, which every core
+  # in the pin range has and which resolves per instant on the ones that
+  # know IANA ids.
+  defp year_signature(tz) do
+    year = Date.utc_today().year
+
+    for month <- 1..12, day <- [1, 15] do
+      case DateUtils.parse_datetime_local(
+             "#{year}-#{String.pad_leading("#{month}", 2, "0")}-#{String.pad_leading("#{day}", 2, "0")}T12:00",
+             tz
+           ) do
+        {:ok, utc} -> DateTime.to_unix(utc)
+        _ -> nil
+      end
     end
   end
 
@@ -1039,18 +1087,12 @@ defmodule PhoenixKitCalendar.Web.CalendarLive do
 
   defp datetime_local_value(value, _tz), do: value
 
-  # "+3" / "0" / "-5.5" → a compact UTC±N label for the indicator row.
-  defp tz_label(tz) do
-    case Float.parse(to_string(tz)) do
-      {h, _} when h > 0 -> "UTC+#{format_offset(h)}"
-      {h, _} when h < 0 -> "UTC-#{format_offset(abs(h))}"
-      _ -> "UTC"
-    end
-  end
-
-  defp format_offset(h) do
-    if h == trunc(h), do: Integer.to_string(trunc(h)), else: Float.to_string(h)
-  end
+  # The indicator row's name for a zone — core's own label, so an IANA id
+  # reads "(UTC+02:00) Europe/Warsaw" and a legacy offset "UTC+03:00". This
+  # was a `Float.parse/1` of the value, which named every IANA zone "UTC": the
+  # very banner the identity comparison made appear said "Alice is in UTC —
+  # you are in UTC".
+  defp tz_label(tz), do: PhoenixKit.Settings.get_timezone_label(to_string(tz))
 
   # (The changeset always holds the EXCLUSIVE end — the inclusive "last
   # day" conversion happens ONLY at render, via inclusive_end_display/1.

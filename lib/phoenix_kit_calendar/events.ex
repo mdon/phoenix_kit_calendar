@@ -295,18 +295,32 @@ defmodule PhoenixKitCalendar.Events do
   end
 
   # The UTC instants bounding a VIEWER-LOCAL day window. Timed events are
-  # stored in UTC and displayed shifted by the viewer offset, so the viewer's
+  # stored in UTC and displayed in the viewer's zone, so the viewer's
   # [from, until) day range maps to the UTC half-open interval
-  # [from 00:00 - offset, until 00:00 - offset). Without this shift, timed
-  # events within `offset` hours of UTC midnight fall out of the very window
-  # the grid places them in (all-day events use bare dates and need no shift).
+  # [local midnight of `from`, local midnight of `until`). Without this shift,
+  # timed events within a few hours of UTC midnight fall out of the very
+  # window the grid places them in (all-day events use bare dates and need no
+  # shift).
+  #
+  # Each bound is resolved AT ITS OWN DATE. This used to subtract one offset —
+  # `offset_to_seconds/1`, a snapshot of the zone's offset *today* — from both
+  # bounds, and with an IANA zone that is wrong for any window on the other
+  # side of a daylight-saving switch from now: a Tallinn viewer opening
+  # January from September got bounds an hour early (today's +3 applied to a
+  # +2 month), so the last local hour of January 31 fell out of the month and
+  # the last hour of December 31 leaked in. `parse_datetime_local/2` reads a
+  # wall clock in the zone on the date given, which is the question here.
   defp window_bounds(from, until, viewer_tz) do
-    offset = DateUtils.offset_to_seconds(viewer_tz)
+    {local_midnight(from, viewer_tz), local_midnight(until, viewer_tz)}
+  end
 
-    {
-      DateTime.new!(from, ~T[00:00:00], "Etc/UTC") |> DateTime.add(-offset, :second),
-      DateTime.new!(until, ~T[00:00:00], "Etc/UTC") |> DateTime.add(-offset, :second)
-    }
+  defp local_midnight(%Date{} = date, viewer_tz) do
+    case DateUtils.parse_datetime_local("#{Date.to_iso8601(date)}T00:00", viewer_tz) do
+      {:ok, utc} -> utc
+      # An unresolvable zone value falls back to UTC midnight — the same
+      # safe default `offset_to_seconds/1` answered with `0`.
+      _ -> DateTime.new!(date, ~T[00:00:00], "Etc/UTC")
+    end
   end
 
   # ===========================================================================
