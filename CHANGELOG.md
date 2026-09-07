@@ -1,3 +1,54 @@
+## 0.2.2 - 2026-09-07
+
+### Fixed
+
+- **Timezones now resolve at each question's own instant, not today's.** Since
+  core 2.13.9 a stored timezone is an IANA id (`Europe/Warsaw`), not a number,
+  and this module was still turning it into one offset and adding that. Every
+  conversion goes through core's per-instant helpers instead, so a named zone
+  follows daylight saving on the date being shown:
+
+  - The day window (`Events.list_events/5`, `list_all_events/4`,
+    `count_events_by_owner/4`) resolved both bounds with the zone's offset
+    *today*. A Tallinn viewer opening January from September got both bounds an
+    hour early — the last local hour of January 31 fell out of the month and
+    the last hour of December 31 leaked in. Each bound is now read at its own
+    date.
+  - The calendar page took `today` from UTC. Between local and UTC midnight
+    (00:00–03:00 in Tallinn in summer) the grid highlighted yesterday, "New
+    event" prefilled yesterday, and on the first of a month the page opened on
+    the previous month.
+  - The cross-timezone indicator compared offsets, which could not read an IANA
+    id at all: `Europe/Warsaw` and `America/New_York` compared equal, so the
+    "Use their timezone" checkbox never appeared. Two ids are now compared by
+    their daylight-saving rule, and anything involving a legacy offset by a
+    year-round signature — so the answer can't flip at the next switch with
+    neither value changed.
+  - That indicator's labels were a numeric parse of the value and read "Alice
+    is in UTC — you are in UTC" for any two named zones. They are core's own
+    labels now.
+
+- **The dashboard widgets order events in the viewer's timezone.** The sort key
+  compared an all-day event's local start DATE against a timed event's UTC
+  instant. For any viewer east of UTC an early-morning event outranked the same
+  day's all-day events — 02:00 in Tallinn is 23:00Z the day before — so Today
+  listed it above the all-day rows it leads with, and Upcoming placed it under
+  the previous day. `WidgetSupport.sort_key/2` now takes the viewer's timezone;
+  the sets of events shown were never affected, only their order.
+
+- Replaced daisyUI 4 classes on the event modal that style nothing in v5.
+
+### Changed
+
+- Dependency updates, most notably `phoenix_kit` 2.2.0 → 2.15.1 (which brings
+  the IANA timezone database via `tz`), plus `phoenix` 1.8.13,
+  `phoenix_live_view` 1.2.11, `oban` 2.24.1, `ecto` 3.14.2 and the transitive
+  set around them.
+
+  The `:phoenix_kit` requirement stays `~> 2.0`. The timezone work is
+  feature-detected, so this release still resolves and runs against a core
+  below 2.13.9 — it simply has no IANA identifiers to tell apart there.
+
 ## 0.2.1 - 2026-08-11
 
 ### Changed
