@@ -7,6 +7,10 @@ defmodule PhoenixKitCalendarTest do
       assert PhoenixKitCalendar.module_name() == "Calendar"
     end
 
+    test "version/0 is single-sourced from mix.exs" do
+      assert PhoenixKitCalendar.version() == Mix.Project.config()[:version]
+    end
+
     test "permission_metadata/0 declares the base key and all sub-permissions" do
       meta = PhoenixKitCalendar.permission_metadata()
 

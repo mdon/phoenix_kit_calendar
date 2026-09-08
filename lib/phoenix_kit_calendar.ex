@@ -52,6 +52,8 @@ defmodule PhoenixKitCalendar do
   alias PhoenixKit.Dashboard.Tab
   alias PhoenixKit.Settings
 
+  @version Mix.Project.config()[:version]
+
   # ===========================================================================
   # Required callbacks
   # ===========================================================================
@@ -96,13 +98,8 @@ defmodule PhoenixKitCalendar do
   # ===========================================================================
 
   @impl PhoenixKit.Module
-  @doc "Version string. Shown on the admin Modules page. Reads the app spec so it can't drift from mix.exs."
-  def version do
-    case Application.spec(:phoenix_kit_calendar, :vsn) do
-      nil -> "0.0.0"
-      vsn -> to_string(vsn)
-    end
-  end
+  @doc "Version string. Shown on the admin Modules page. Read from mix.exs at compile time so it can't drift."
+  def version, do: @version
 
   @impl PhoenixKit.Module
   @doc """
